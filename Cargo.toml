@@ -8,6 +8,8 @@ authors = ["crux03"]
 version = "0.1.0"
 edition = "2024"
 description = "A dynamic text evaluation language for procedural content generation"
+license = "MIT"
+repository = "https://github.com/crux-03/weaver_lang"
 
 [dependencies]
 pest = "=2.8.6"

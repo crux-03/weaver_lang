@@ -1,8 +1,11 @@
 [package]
 name = "weaver_macros"
+description = "Helper macros for the weaver_lang crate"
 authors = ["crux03"]
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/crux-03/weaver_lang"
+license = "MIT"
 
 [lib]
 proc-macro = true
