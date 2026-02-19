@@ -1,0 +1,172 @@
+//
+// weaver-lang grammar
+//
+// Two layers: template (top-level, free-form text with embedded constructs)
+// and expression (typed values inside constructs).
+//
+// Template parsing is NOT whitespace-insensitive. Raw text matters.
+// Expression parsing (inside delimiters) IS whitespace-insensitive.
+
+// ── Top-level ───────────────────────────────────────────────────────────
+
+template = { SOI ~ node* ~ EOI }
+
+node = _{
+    if_block
+    | foreach_block
+    | expression_node
+    | command_node
+    | literal_text
+}
+
+/// Raw text — everything that isn't a weaver construct.
+/// Matches one or more characters that don't start a construct.
+literal_text = @{
+    (
+        !( "{{" | "{#" | "@[" | "$[" | "<trigger" | "[[" )
+        ~ ANY
+    )+
+}
+
+// ── Expression nodes (template-level, result gets string-coerced) ───────
+
+expression_node = _{
+    variable
+    | processor_call
+    | trigger
+    | document_ref
+}
+
+// ── Command node (template-level, return value is optional) ─────────────
+
+command_node = { command_call }
+
+// ── Variables: {{scope:name}} ───────────────────────────────────────────
+
+variable = { "{{" ~ ws ~ identifier ~ ":" ~ identifier ~ ws ~ "}}" }
+
+// ── Processors: @[namespace.name(key: value, key2: value2)] ─────────────
+
+processor_call = {
+    "@[" ~ ws ~ dotted_name ~ "(" ~ ws ~ property_list? ~ ws ~ ")" ~ ws ~ "]"
+}
+
+property_list = { property ~ (ws ~ "," ~ ws ~ property)* }
+
+property = { identifier ~ ws ~ ":" ~ ws ~ expr }
+
+// ── Commands: $[name(arg1, arg2)] ───────────────────────────────────────
+
+command_call = {
+    "$[" ~ ws ~ identifier ~ "(" ~ ws ~ arg_list? ~ ws ~ ")" ~ ws ~ "]"
+}
+
+arg_list = { expr ~ (ws ~ "," ~ ws ~ expr)* }
+
+// ── Triggers: <trigger id="entry-id"> ───────────────────────────────────
+
+trigger = {
+    "<trigger" ~ ws ~ "id" ~ ws ~ "=" ~ ws ~ quoted_string ~ ws ~ ">"
+}
+
+// ── Documents: [[DOCUMENT_ID]] ──────────────────────────────────────────
+
+document_ref = {
+    "[[" ~ ws ~ identifier ~ ws ~ "]]"
+}
+
+// ── Control flow ────────────────────────────────────────────────────────
+
+if_block = {
+    if_open ~ node* ~
+    elif_branch* ~
+    else_branch? ~
+    if_close
+}
+
+if_open  = _{ "{#" ~ ws ~ "if" ~ ws ~ expr ~ ws ~ "#}" }
+if_close = _{ "{#" ~ ws ~ "endif" ~ ws ~ "#}" }
+
+elif_branch = {
+    "{#" ~ ws ~ "elif" ~ ws ~ expr ~ ws ~ "#}" ~ node*
+}
+
+else_branch = {
+    "{#" ~ ws ~ "else" ~ ws ~ "#}" ~ node*
+}
+
+foreach_block = {
+    foreach_open ~ node* ~ foreach_close
+}
+
+foreach_open  = _{ "{#" ~ ws ~ "foreach" ~ ws ~ identifier ~ ws ~ "in" ~ ws ~ expr ~ ws ~ "#}" }
+foreach_close = _{ "{#" ~ ws ~ "endforeach" ~ ws ~ "#}" }
+
+// ── Expressions ─────────────────────────────────────────────────────────
+// Used inside if conditions, processor values, command args, foreach iterables.
+// This layer is whitespace-insensitive (ws between tokens).
+
+expr = { unary_expr ~ (ws ~ bin_op ~ ws ~ unary_expr)* }
+
+unary_expr = {
+    unary_op ~ ws ~ atom
+    | atom
+}
+
+atom = {
+    "(" ~ ws ~ expr ~ ws ~ ")"
+    | array_literal
+    | variable
+    | processor_call
+    | command_call
+    | trigger
+    | document_ref
+    | bool_literal
+    | none_literal
+    | number
+    | quoted_string
+}
+
+array_literal = { "[" ~ ws ~ (expr ~ (ws ~ "," ~ ws ~ expr)*)? ~ ws ~ "]" }
+
+// ── Operators ───────────────────────────────────────────────────────────
+
+bin_op = {
+    "==" | "!=" | "<=" | ">=" | "<" | ">"
+    | "&&" | "||"
+    | "+" | "-" | "*" | "/"
+}
+
+unary_op = { "!" | "-" }
+
+// ── Literals & atoms ────────────────────────────────────────────────────
+
+bool_literal = @{ "true" | "false" }
+none_literal = @{ "none" }
+
+number = @{
+    "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)?
+}
+
+/// Double-quoted string with escape sequences
+quoted_string = ${ "\"" ~ string_inner ~ "\"" }
+string_inner  = @{ (escape_seq | !("\"" | "\\") ~ ANY)* }
+escape_seq    = @{ "\\" ~ ("\"" | "\\" | "n" | "t" | "r") }
+
+// ── Identifiers ─────────────────────────────────────────────────────────
+
+identifier = @{
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+}
+
+/// Dotted name for namespaced processors: "core.weaver.rng"
+dotted_name = @{
+    identifier ~ ("." ~ identifier)*
+}
+
+// ── Whitespace (explicit, not implicit) ─────────────────────────────────
+// We do NOT use pest's implicit WHITESPACE rule because template-level
+// text is whitespace-significant. Instead we use `ws` explicitly
+// inside expression contexts.
+
+ws = _{ (" " | "\t" | "\r" | "\n")* }

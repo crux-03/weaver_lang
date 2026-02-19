@@ -1,0 +1,23 @@
+[workspace]
+members = [".", "weaver_macros"]
+resolver = "2"
+
+[package]
+name = "weaver_lang"
+authors = ["crux03"]
+version = "0.1.0"
+edition = "2024"
+description = "A dynamic text evaluation language for procedural content generation"
+
+[dependencies]
+pest = "=2.8.6"
+pest_derive = "=2.8.6"
+thiserror = "1"
+weaver_macros = { version = "0.1.0", path = "weaver_macros", optional = true }
+
+[dev-dependencies]
+weaver_macros = { version = "0.1.0", path = "weaver_macros" }
+
+[features]
+default = ["macros"]
+macros = ["dep:weaver_macros"]
