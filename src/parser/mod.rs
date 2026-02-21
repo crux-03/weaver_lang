@@ -53,6 +53,33 @@ pub fn parse(source: &str) -> Result<Template, Vec<ParseError>> {
     Ok(template)
 }
 
+/// Parse a standalone expression from source text.
+///
+/// This parses a single weaver-lang expression (the same syntax used
+/// inside `{# if ... #}` conditions, processor arguments, and command
+/// arguments) without any surrounding template structure.
+///
+/// Use this for evaluating activation conditions, configuration
+/// expressions, or any context where you need a typed [`Value`] result
+/// rather than a rendered string.
+///
+/// # Examples
+///
+/// ```rust
+/// use weaver_lang::parse_expr;
+///
+/// let expr = parse_expr(r#"{{state:level}} > 5"#).unwrap();
+/// let expr = parse_expr(r#""hello" == "hello""#).unwrap();
+/// let expr = parse_expr(r#"@[array.contains(items: ["a", "b"], value: "a")]"#).unwrap();
+/// ```
+pub fn parse_expr(source: &str) -> Result<Expr, Vec<ParseError>> {
+    let pairs = WeaverParser::parse(Rule::expr, source).map_err(|e| {
+        vec![ParseError::new(pest_span_to_span(&e), format!("expression parse error: {e}"))]
+    })?;
+    let pair = pairs.into_iter().next().unwrap();
+    build_expr(pair)
+}
+
 fn pest_span_to_span(e: &pest::error::Error<Rule>) -> Span {
     match &e.location {
         pest::error::InputLocation::Pos(p) => Span::new(*p, *p + 1),

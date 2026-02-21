@@ -109,6 +109,7 @@ foreach_close = _{ "{#" ~ ws ~ "endforeach" ~ ws ~ "#}" }
 // This layer is whitespace-insensitive (ws between tokens).
 
 expr = { unary_expr ~ (ws ~ bin_op ~ ws ~ unary_expr)* }
+expr_standalone = { SOI ~ ws ~ expr ~ ws ~ EOI }
 
 unary_expr = {
     unary_op ~ ws ~ atom

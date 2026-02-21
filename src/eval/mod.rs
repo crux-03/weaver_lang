@@ -36,6 +36,50 @@ pub fn evaluate(
     evaluator.eval_template(template, ctx, registry)
 }
 
+/// Evaluate a parsed expression and return its [`Value`] directly.
+///
+/// Unlike [`evaluate`], which walks a full template AST and produces
+/// a string, this evaluates a single expression and returns the typed
+/// result. The value is not coerced to a string — you get the actual
+/// [`Value::Bool`], [`Value::Number`], etc.
+///
+/// This is the evaluation counterpart to [`parse_expr`](crate::parse_expr).
+/// Together they support use cases like lorebook activation conditions
+/// where you need a boolean result, not rendered text.
+///
+/// # Examples
+///
+/// ```rust
+/// use weaver_lang::{parse_expr, eval_expr_value, SimpleContext, Registry, Value};
+///
+/// let expr = parse_expr("1 + 2 == 3").unwrap();
+/// let mut ctx = SimpleContext::new();
+/// let registry = Registry::new();
+///
+/// let result = eval_expr_value(&expr, &mut ctx, &registry).unwrap();
+/// assert_eq!(result, Value::Bool(true));
+/// ```
+///
+/// ```rust
+/// use weaver_lang::{parse_expr, eval_expr_value, SimpleContext, Registry, Value};
+///
+/// let expr = parse_expr(r#"{{global:hp}} > 50"#).unwrap();
+/// let mut ctx = SimpleContext::new();
+/// ctx.set("global", "hp", 75i64);
+/// let registry = Registry::new();
+///
+/// let result = eval_expr_value(&expr, &mut ctx, &registry).unwrap();
+/// assert_eq!(result, Value::Bool(true));
+/// ```
+pub fn eval_expr_value(
+    expr: &Expr,
+    ctx: &mut impl EvalContext,
+    registry: &Registry,
+) -> Result<Value, EvalError> {
+    let mut evaluator = Evaluator::new(EvalOptions::default());
+    evaluator.eval_expr(expr, ctx, registry)
+}
+
 /// Evaluate a template with custom options for resource limits, cancellation,
 /// and lenient mode.
 ///
@@ -527,21 +571,20 @@ impl Evaluator {
     ) -> Result<Value, EvalError> {
         match &var.scope {
             // Bare variable — lexical scope only
-            None => {
-                match self.resolve_lexical(&var.name) {
-                    Some(val) => Ok(val),
-                    None => {
-                        if self.options.lenient {
-                            Ok(Value::String(format!("{{{{{}}}}}", var.name)))
-                        } else {
-                            Err(EvalError::new(
-                                EvalErrorKind::UndefinedVariable,
-                                format!("undefined loop variable: {}", var.name),
-                            ).with_span(span))
-                        }
+            None => match self.resolve_lexical(&var.name) {
+                Some(val) => Ok(val),
+                None => {
+                    if self.options.lenient {
+                        Ok(Value::String(format!("{{{{{}}}}}", var.name)))
+                    } else {
+                        Err(EvalError::new(
+                            EvalErrorKind::UndefinedVariable,
+                            format!("undefined loop variable: {}", var.name),
+                        )
+                        .with_span(span))
                     }
                 }
-            }
+            },
             // Scoped variable — check lexical for "local", then host
             Some(scope) => {
                 if scope == "local"
@@ -554,10 +597,7 @@ impl Evaluator {
                     Some(val) => Ok(val),
                     None => {
                         if self.options.lenient {
-                            Ok(Value::String(format!(
-                                "{{{{{0}:{1}}}}}",
-                                scope, var.name
-                            )))
+                            Ok(Value::String(format!("{{{{{0}:{1}}}}}", scope, var.name)))
                         } else {
                             Err(EvalError::undefined_variable(scope, &var.name).with_span(span))
                         }
@@ -1038,7 +1078,9 @@ mod tests {
     fn test_foreach_bare_and_local_scope_compat() {
         // Both {{item}} and {{local:item}} resolve the loop binding
         assert_eq!(
-            eval_simple(r#"{# foreach x in ["ok"] #}bare={{x}} scoped={{local:x}}{# endforeach #}"#),
+            eval_simple(
+                r#"{# foreach x in ["ok"] #}bare={{x}} scoped={{local:x}}{# endforeach #}"#
+            ),
             "bare=ok scoped=ok"
         );
     }
@@ -1063,7 +1105,10 @@ mod tests {
         ctx.set("local", "name", "Alice");
         let registry = Registry::new();
         let result = evaluate(&template, &mut ctx, &registry);
-        assert!(result.is_err(), "bare {{name}} should not resolve host local:name");
+        assert!(
+            result.is_err(),
+            "bare {{name}} should not resolve host local:name"
+        );
     }
 }
 
@@ -1260,8 +1305,7 @@ mod options_tests {
     #[test]
     fn test_node_evaluation_limit() {
         // A simple template that exceeds a very low limit
-        let src =
-            r#"{# foreach item in ["a", "b", "c", "d", "e"] #}{{item}}{# endforeach #}"#;
+        let src = r#"{# foreach item in ["a", "b", "c", "d", "e"] #}{{item}}{# endforeach #}"#;
         let template = parser::parse(src).expect("parse failed");
         let mut ctx = SimpleContext::new();
         let registry = Registry::new();
@@ -1492,5 +1536,451 @@ mod options_tests {
         let cloned = eval_err.clone();
         assert_eq!(cloned.message, eval_err.message);
         assert!(cloned.source.is_some());
+    }
+}
+
+#[cfg(test)]
+mod expr_eval_tests {
+    use super::*;
+    use crate::parser;
+    use crate::registry::{ClosureCommand, ClosureProcessor};
+
+    fn eval_expr(source: &str) -> Value {
+        let expr = parser::parse_expr(source).expect("parse_expr failed");
+        let mut ctx = SimpleContext::new();
+        let registry = Registry::new();
+        eval_expr_value(&expr, &mut ctx, &registry).expect("eval failed")
+    }
+
+    fn eval_expr_ctx(source: &str, ctx: &mut SimpleContext, registry: &Registry) -> Value {
+        let expr = parser::parse_expr(source).expect("parse_expr failed");
+        eval_expr_value(&expr, ctx, registry).expect("eval failed")
+    }
+
+    // ── Literals ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_expr_string_literal() {
+        assert_eq!(eval_expr(r#""hello""#), Value::String("hello".into()));
+    }
+
+    #[test]
+    fn test_expr_number_literal() {
+        assert_eq!(eval_expr("42"), Value::Number(42.0));
+    }
+
+    #[test]
+    fn test_expr_float_literal() {
+        assert_eq!(eval_expr("3.14"), Value::Number(3.14));
+    }
+
+    #[test]
+    fn test_expr_negative_number() {
+        assert_eq!(eval_expr("-7"), Value::Number(-7.0));
+    }
+
+    #[test]
+    fn test_expr_bool_true() {
+        assert_eq!(eval_expr("true"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_expr_bool_false() {
+        assert_eq!(eval_expr("false"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_expr_none() {
+        assert_eq!(eval_expr("none"), Value::None);
+    }
+
+    // ── Arrays ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_expr_empty_array() {
+        assert_eq!(eval_expr("[]"), Value::Array(vec![]));
+    }
+
+    #[test]
+    fn test_expr_array_of_strings() {
+        assert_eq!(
+            eval_expr(r#"["a", "b", "c"]"#),
+            Value::Array(vec![
+                Value::String("a".into()),
+                Value::String("b".into()),
+                Value::String("c".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_expr_mixed_array() {
+        assert_eq!(
+            eval_expr(r#"["hello", 42, true]"#),
+            Value::Array(vec![
+                Value::String("hello".into()),
+                Value::Number(42.0),
+                Value::Bool(true),
+            ])
+        );
+    }
+
+    // ── Arithmetic ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_expr_addition() {
+        assert_eq!(eval_expr("1 + 2"), Value::Number(3.0));
+    }
+
+    #[test]
+    fn test_expr_subtraction() {
+        assert_eq!(eval_expr("10 - 3"), Value::Number(7.0));
+    }
+
+    #[test]
+    fn test_expr_multiplication() {
+        assert_eq!(eval_expr("4 * 5"), Value::Number(20.0));
+    }
+
+    #[test]
+    fn test_expr_division() {
+        assert_eq!(eval_expr("15 / 3"), Value::Number(5.0));
+    }
+
+    #[test]
+    fn test_expr_chained_arithmetic() {
+        // Left-to-right: (1 + 2) * 3 = 9 (no precedence yet)
+        assert_eq!(eval_expr("1 + 2 * 3"), Value::Number(9.0));
+    }
+
+    #[test]
+    fn test_expr_parenthesized() {
+        assert_eq!(eval_expr("(1 + 2) * 3"), Value::Number(9.0));
+    }
+
+    #[test]
+    fn test_expr_string_concatenation() {
+        assert_eq!(
+            eval_expr(r#""hello" + " " + "world""#),
+            Value::String("hello world".into())
+        );
+    }
+
+    // ── Comparison ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_expr_eq_true() {
+        assert_eq!(eval_expr("5 == 5"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_expr_eq_false() {
+        assert_eq!(eval_expr("5 == 6"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_expr_neq() {
+        assert_eq!(eval_expr("5 != 6"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_expr_string_equality() {
+        assert_eq!(eval_expr(r#""abc" == "abc""#), Value::Bool(true));
+        assert_eq!(eval_expr(r#""abc" == "xyz""#), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_expr_lt() {
+        assert_eq!(eval_expr("3 < 5"), Value::Bool(true));
+        assert_eq!(eval_expr("5 < 3"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_expr_gt() {
+        assert_eq!(eval_expr("5 > 3"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_expr_lteq() {
+        assert_eq!(eval_expr("5 <= 5"), Value::Bool(true));
+        assert_eq!(eval_expr("5 <= 6"), Value::Bool(true));
+        assert_eq!(eval_expr("6 <= 5"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_expr_gteq() {
+        assert_eq!(eval_expr("5 >= 5"), Value::Bool(true));
+        assert_eq!(eval_expr("5 >= 4"), Value::Bool(true));
+        assert_eq!(eval_expr("4 >= 5"), Value::Bool(false));
+    }
+
+    // ── Logical operators ───────────────────────────────────────────
+
+    #[test]
+    fn test_expr_and() {
+        assert_eq!(eval_expr("true && true"), Value::Bool(true));
+        assert_eq!(eval_expr("true && false"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_expr_or() {
+        assert_eq!(eval_expr("false || true"), Value::Bool(true));
+        assert_eq!(eval_expr("false || false"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_expr_not() {
+        assert_eq!(eval_expr("!true"), Value::Bool(false));
+        assert_eq!(eval_expr("!false"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_expr_not_truthy() {
+        // 0 is falsy, non-zero is truthy
+        assert_eq!(eval_expr("!0"), Value::Bool(true));
+        assert_eq!(eval_expr("!1"), Value::Bool(false));
+        // empty string is falsy
+        assert_eq!(eval_expr(r#"!"""#), Value::Bool(true));
+        assert_eq!(eval_expr(r#"!"hello""#), Value::Bool(false));
+    }
+
+    // ── Variables ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_expr_scoped_variable() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("state", "hp", 75i64);
+        let registry = Registry::new();
+        assert_eq!(
+            eval_expr_ctx("{{state:hp}}", &mut ctx, &registry),
+            Value::Number(75.0)
+        );
+    }
+
+    #[test]
+    fn test_expr_variable_in_comparison() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("state", "level", 8i64);
+        let registry = Registry::new();
+        assert_eq!(
+            eval_expr_ctx("{{state:level}} >= 5", &mut ctx, &registry),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_expr_string_variable_equality() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("state", "location", "dark_forest");
+        let registry = Registry::new();
+        assert_eq!(
+            eval_expr_ctx(
+                r#"{{state:location}} == "dark_forest""#,
+                &mut ctx,
+                &registry,
+            ),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_expr_variable_arithmetic() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("char", "base_hp", 50i64);
+        ctx.set("char", "level", 10i64);
+        let registry = Registry::new();
+        assert_eq!(
+            eval_expr_ctx("{{char:base_hp}} + {{char:level}} * 5", &mut ctx, &registry,),
+            // Left-to-right: (50 + 10) * 5 = 300
+            Value::Number(300.0)
+        );
+    }
+
+    #[test]
+    fn test_expr_multiple_variables_logical() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("state", "has_key", Value::Bool(true));
+        ctx.set("state", "door_locked", Value::Bool(true));
+        let registry = Registry::new();
+        assert_eq!(
+            eval_expr_ctx(
+                "{{state:has_key}} && {{state:door_locked}}",
+                &mut ctx,
+                &registry,
+            ),
+            Value::Bool(true)
+        );
+    }
+
+    // ── Processor calls ─────────────────────────────────────────────
+
+    #[test]
+    fn test_expr_processor_call() {
+        let mut ctx = SimpleContext::new();
+        let mut registry = Registry::new();
+        registry.register_processor(ClosureProcessor::new("math", "add", |props| {
+            let a = props.get("a").and_then(|v| v.as_number()).unwrap_or(0.0);
+            let b = props.get("b").and_then(|v| v.as_number()).unwrap_or(0.0);
+            Ok(Value::Number(a + b))
+        }));
+
+        assert_eq!(
+            eval_expr_ctx("@[math.add(a: 10, b: 20)]", &mut ctx, &registry),
+            Value::Number(30.0)
+        );
+    }
+
+    #[test]
+    fn test_expr_processor_in_comparison() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("char", "level", 10i64);
+        let mut registry = Registry::new();
+        registry.register_processor(ClosureProcessor::new("math", "mul", |props| {
+            let a = props.get("a").and_then(|v| v.as_number()).unwrap_or(0.0);
+            let b = props.get("b").and_then(|v| v.as_number()).unwrap_or(0.0);
+            Ok(Value::Number(a * b))
+        }));
+
+        assert_eq!(
+            eval_expr_ctx(
+                "@[math.mul(a: {{char:level}}, b: 1.5)] > 10",
+                &mut ctx,
+                &registry,
+            ),
+            Value::Bool(true) // 10 * 1.5 = 15 > 10
+        );
+    }
+
+    #[test]
+    fn test_expr_array_contains_processor() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("state", "location", "dark_forest");
+        let mut registry = Registry::new();
+        registry.register_processor(ClosureProcessor::new("array", "contains", |props| {
+            let items = props.get("items").and_then(|v| v.as_array()).unwrap_or(&[]);
+            let value = props.get("value").cloned().unwrap_or(Value::None);
+            let found = items.iter().any(|item| item == &value);
+            Ok(Value::Bool(found))
+        }));
+
+        assert_eq!(
+            eval_expr_ctx(
+                r#"@[array.contains(items: ["dark_forest", "dark_forest_outskirts"], value: {{state:location}})]"#,
+                &mut ctx,
+                &registry,
+            ),
+            Value::Bool(true)
+        );
+
+        ctx.set("state", "location", "town_square");
+        assert_eq!(
+            eval_expr_ctx(
+                r#"@[array.contains(items: ["dark_forest", "dark_forest_outskirts"], value: {{state:location}})]"#,
+                &mut ctx,
+                &registry,
+            ),
+            Value::Bool(false)
+        );
+    }
+
+    // ── Error cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_expr_undefined_variable_errors() {
+        let expr = parser::parse_expr("{{state:missing}}").unwrap();
+        let mut ctx = SimpleContext::new();
+        let registry = Registry::new();
+        let result = eval_expr_value(&expr, &mut ctx, &registry);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_expr_type_error_on_comparison() {
+        // Comparing string < number should fail
+        let expr = parser::parse_expr(r#""hello" < 5"#).unwrap();
+        let mut ctx = SimpleContext::new();
+        let registry = Registry::new();
+        let result = eval_expr_value(&expr, &mut ctx, &registry);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_expr_division_by_zero() {
+        let expr = parser::parse_expr("10 / 0").unwrap();
+        let mut ctx = SimpleContext::new();
+        let registry = Registry::new();
+        let result = eval_expr_value(&expr, &mut ctx, &registry);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_expr_parse_error_on_garbage() {
+        let result = parser::parse_expr("== == ==");
+        assert!(result.is_err());
+    }
+
+    // ── Activation-style conditions ─────────────────────────────────
+    // These mirror the patterns that lorebook entries will actually use.
+
+    #[test]
+    fn test_activation_location_check() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("state", "location", "dark_forest");
+        let registry = Registry::new();
+
+        let expr = parser::parse_expr(r#"{{state:location}} == "dark_forest""#).unwrap();
+
+        let result = eval_expr_value(&expr, &mut ctx, &registry).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_activation_level_gate() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("char", "level", 12i64);
+        let registry = Registry::new();
+
+        let expr = parser::parse_expr("{{char:level}} >= 10 && {{char:level}} < 20").unwrap();
+
+        let result = eval_expr_value(&expr, &mut ctx, &registry).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        ctx.set("char", "level", 5i64);
+        let result = eval_expr_value(&expr, &mut ctx, &registry).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_activation_compound_condition() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("state", "quest_active", Value::Bool(true));
+        ctx.set("char", "class", "Mage");
+        ctx.set("char", "level", 8i64);
+        let registry = Registry::new();
+
+        let expr = parser::parse_expr(
+            r#"{{state:quest_active}} && {{char:class}} == "Mage" && {{char:level}} > 5"#,
+        )
+        .unwrap();
+
+        let result = eval_expr_value(&expr, &mut ctx, &registry).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Flip one condition
+        ctx.set("state", "quest_active", Value::Bool(false));
+        let result = eval_expr_value(&expr, &mut ctx, &registry).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_activation_truthy_none_is_false() {
+        // An unset state variable in lenient mode returns None,
+        // which is falsy — useful as a "has this been initialized" check.
+        let expr = parser::parse_expr("!none").unwrap();
+        let mut ctx = SimpleContext::new();
+        let registry = Registry::new();
+
+        let result = eval_expr_value(&expr, &mut ctx, &registry).unwrap();
+        assert_eq!(result, Value::Bool(true)); // !none == true
     }
 }

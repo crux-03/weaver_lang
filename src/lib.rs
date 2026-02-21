@@ -76,8 +76,8 @@ pub use ast::span::{Span, Spanned};
 pub use ast::template::Template;
 pub use ast::value::Value;
 pub use error::{EvalError, EvalErrorKind, ParseError};
-pub use eval::{EvalContext, EvalOptions, SimpleContext, evaluate, evaluate_with_options};
-pub use parser::parse;
+pub use eval::{EvalContext, EvalOptions, SimpleContext, evaluate, evaluate_with_options, eval_expr_value};
+pub use parser::{parse, parse_expr};
 pub use registry::{ClosureCommand, ClosureProcessor, Registry, WeaverCommand, WeaverProcessor};
 
 /// Parse source text and evaluate it in a single step.
