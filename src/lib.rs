@@ -76,7 +76,9 @@ pub use ast::span::{Span, Spanned};
 pub use ast::template::Template;
 pub use ast::value::Value;
 pub use error::{EvalError, EvalErrorKind, ParseError};
-pub use eval::{EvalContext, EvalOptions, SimpleContext, evaluate, evaluate_with_options, eval_expr_value};
+pub use eval::{
+    EvalContext, EvalOptions, SimpleContext, eval_expr_value, evaluate, evaluate_with_options,
+};
 pub use parser::{parse, parse_expr};
 pub use registry::{ClosureCommand, ClosureProcessor, Registry, WeaverCommand, WeaverProcessor};
 
@@ -184,5 +186,51 @@ impl CompiledTemplate {
     /// Access the underlying AST for inspection or analysis.
     pub fn ast(&self) -> &Template {
         &self.template
+    }
+}
+
+/// A parsed expression that can be evaluated multiple times without re-parsing.
+///
+/// This is the expression-level counterpart to [`CompiledTemplate`].
+/// Use it for lorebook activation conditions, configuration values,
+/// or any context where you need to evaluate the same expression
+/// repeatedly against different state.
+///
+/// ```rust
+/// use weaver_lang::{CompiledExpr, SimpleContext, Registry, Value};
+///
+/// let expr = CompiledExpr::compile(r#"{{global:hp}} > 50"#).unwrap();
+/// let registry = Registry::new();
+///
+/// let mut ctx = SimpleContext::new();
+/// ctx.set("global", "hp", 75i64);
+/// assert_eq!(expr.evaluate(&mut ctx, &registry).unwrap(), Value::Bool(true));
+///
+/// ctx.set("global", "hp", 30i64);
+/// assert_eq!(expr.evaluate(&mut ctx, &registry).unwrap(), Value::Bool(false));
+/// ```
+pub struct CompiledExpr {
+    expr: ast::Expr,
+}
+
+impl CompiledExpr {
+    /// Parse an expression string into a compiled expression.
+    pub fn compile(source: &str) -> Result<Self, Vec<ParseError>> {
+        let expr = parse_expr(source)?;
+        Ok(Self { expr })
+    }
+
+    /// Evaluate this expression against the given context and registry.
+    pub fn evaluate(
+        &self,
+        ctx: &mut impl EvalContext,
+        registry: &Registry,
+    ) -> Result<Value, EvalError> {
+        eval_expr_value(&self.expr, ctx, registry)
+    }
+
+    /// Access the underlying AST for inspection.
+    pub fn ast(&self) -> &ast::Expr {
+        &self.expr
     }
 }

@@ -1543,7 +1543,7 @@ mod options_tests {
 mod expr_eval_tests {
     use super::*;
     use crate::parser;
-    use crate::registry::{ClosureCommand, ClosureProcessor};
+    use crate::registry::{ClosureProcessor};
 
     fn eval_expr(source: &str) -> Value {
         let expr = parser::parse_expr(source).expect("parse_expr failed");
