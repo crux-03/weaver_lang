@@ -112,10 +112,20 @@ fn build_node(pair: pest::iterators::Pair<Rule>) -> Result<Option<Node>, Vec<Par
 // -- Expression building -------------------------------------------------
 
 fn build_variable(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
-    let mut inner = pair.into_inner();
-    let scope = inner.next().unwrap().as_str().to_string();
-    let name = inner.next().unwrap().as_str().to_string();
-    Ok(ExprKind::Variable(VariableRef { scope, name }))
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::scoped_var => {
+            let mut parts = inner.into_inner();
+            let scope = parts.next().unwrap().as_str().to_string();
+            let name = parts.next().unwrap().as_str().to_string();
+            Ok(ExprKind::Variable(VariableRef { scope: Some(scope), name }))
+        }
+        Rule::bare_var => {
+            let name = inner.into_inner().next().unwrap().as_str().to_string();
+            Ok(ExprKind::Variable(VariableRef { scope: None, name }))
+        }
+        _ => unreachable!(),
+    }
 }
 
 fn build_processor_call(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
@@ -640,10 +650,23 @@ mod tests {
         assert_eq!(template.nodes.len(), 1);
         match &template.nodes[0].node {
             NodeKind::Expression(ExprKind::Variable(v)) => {
-                assert_eq!(v.scope, "global");
+                assert_eq!(v.scope, Some("global".to_string()));
                 assert_eq!(v.name, "name");
             }
             _ => panic!("expected variable"),
+        }
+    }
+
+    #[test]
+    fn test_bare_variable() {
+        let template = parse("{{item}}").unwrap();
+        assert_eq!(template.nodes.len(), 1);
+        match &template.nodes[0].node {
+            NodeKind::Expression(ExprKind::Variable(v)) => {
+                assert_eq!(v.scope, None);
+                assert_eq!(v.name, "item");
+            }
+            _ => panic!("expected bare variable"),
         }
     }
 

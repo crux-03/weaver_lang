@@ -41,9 +41,11 @@ expression_node = _{
 
 command_node = { command_call }
 
-// ── Variables: {{scope:name}} ───────────────────────────────────────────
+// ── Variables: {{scope:name}} or {{name}} (bare loop binding) ───────────
 
-variable = { "{{" ~ ws ~ identifier ~ ":" ~ identifier ~ ws ~ "}}" }
+variable = { "{{" ~ ws ~ (scoped_var | bare_var) ~ ws ~ "}}" }
+scoped_var = { identifier ~ ":" ~ identifier }
+bare_var   = { identifier }
 
 // ── Processors: @[namespace.name(key: value, key2: value2)] ─────────────
 

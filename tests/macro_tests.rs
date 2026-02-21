@@ -1,6 +1,6 @@
 #[allow(unused_imports)]
 use weaver_lang::{evaluate, EvalContext, EvalError, EvalErrorKind, Registry, SimpleContext, Value};
-use weaver_macros::{weaver_command, weaver_processor};
+use macros::{weaver_command, weaver_processor};
 
 // ── Basic processor: picks first item from an array ─────────────────────
 

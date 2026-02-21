@@ -511,33 +511,57 @@ impl Evaluator {
 
     /// Variable resolution with lexical scope shadowing.
     ///
-    /// For the "local" scope: check lexical stack first, then EvalContext.
-    /// For all other scopes (global, custom): go directly to EvalContext.
+    /// - **Bare variables** (`{{item}}`): resolve from the lexical scope
+    ///   stack only. These are loop bindings and never reach the host.
+    /// - **`local` scope**: check lexical stack first, then EvalContext.
+    /// - **All other scopes** (global, custom): go directly to EvalContext.
     ///
-    /// This means a foreach binding `item` shadows `local:item` but NOT
-    /// `global:item`. Users retain access to global state inside loops.
+    /// This means a foreach binding `item` is accessible as `{{item}}`
+    /// (preferred) or `{{local:item}}` (backward-compatible). Bare syntax
+    /// does NOT fall through to the host context.
     fn resolve_variable(
         &self,
         var: &VariableRef,
         span: crate::ast::span::Span,
         ctx: &impl EvalContext,
     ) -> Result<Value, EvalError> {
-        if var.scope == "local"
-            && let Some(val) = self.resolve_lexical(&var.name)
-        {
-            return Ok(val);
-        }
-
-        match ctx.resolve_variable(&var.scope, &var.name)? {
-            Some(val) => Ok(val),
+        match &var.scope {
+            // Bare variable — lexical scope only
             None => {
-                if self.options.lenient {
-                    Ok(Value::String(format!(
-                        "{{{{{0}:{1}}}}}",
-                        var.scope, var.name
-                    )))
-                } else {
-                    Err(EvalError::undefined_variable(&var.scope, &var.name).with_span(span))
+                match self.resolve_lexical(&var.name) {
+                    Some(val) => Ok(val),
+                    None => {
+                        if self.options.lenient {
+                            Ok(Value::String(format!("{{{{{}}}}}", var.name)))
+                        } else {
+                            Err(EvalError::new(
+                                EvalErrorKind::UndefinedVariable,
+                                format!("undefined loop variable: {}", var.name),
+                            ).with_span(span))
+                        }
+                    }
+                }
+            }
+            // Scoped variable — check lexical for "local", then host
+            Some(scope) => {
+                if scope == "local"
+                    && let Some(val) = self.resolve_lexical(&var.name)
+                {
+                    return Ok(val);
+                }
+
+                match ctx.resolve_variable(scope, &var.name)? {
+                    Some(val) => Ok(val),
+                    None => {
+                        if self.options.lenient {
+                            Ok(Value::String(format!(
+                                "{{{{{0}:{1}}}}}",
+                                scope, var.name
+                            )))
+                        } else {
+                            Err(EvalError::undefined_variable(scope, &var.name).with_span(span))
+                        }
+                    }
                 }
             }
         }
@@ -918,7 +942,7 @@ mod tests {
     #[test]
     fn test_foreach() {
         assert_eq!(
-            eval_simple(r#"{# foreach item in ["a", "b", "c"] #}{{local:item}}{# endforeach #}"#),
+            eval_simple(r#"{# foreach item in ["a", "b", "c"] #}{{item}}{# endforeach #}"#),
             "abc"
         );
     }
@@ -926,7 +950,7 @@ mod tests {
     #[test]
     fn test_foreach_with_separator() {
         assert_eq!(
-            eval_simple(r#"{# foreach item in ["a", "b", "c"] #}{{local:item}}, {# endforeach #}"#),
+            eval_simple(r#"{# foreach item in ["a", "b", "c"] #}{{item}}, {# endforeach #}"#),
             "a, b, c, "
         );
     }
@@ -992,7 +1016,7 @@ mod tests {
     fn test_foreach_does_not_shadow_global() {
         let mut ctx = SimpleContext::new();
         ctx.set("global", "item", "GLOBAL_VALUE");
-        let src = r#"{# foreach item in ["local_val"] #}local={{local:item}} global={{global:item}}{# endforeach #}"#;
+        let src = r#"{# foreach item in ["local_val"] #}local={{item}} global={{global:item}}{# endforeach #}"#;
         assert_eq!(
             eval_with_ctx(src, &mut ctx),
             "local=local_val global=GLOBAL_VALUE"
@@ -1003,11 +1027,43 @@ mod tests {
     fn test_foreach_shadows_host_local() {
         let mut ctx = SimpleContext::new();
         ctx.set("local", "item", "HOST_VALUE");
-        let src = r#"before={{local:item}} {# foreach item in ["LOOP"] #}during={{local:item}}{# endforeach #} after={{local:item}}"#;
+        let src = r#"before={{local:item}} {# foreach item in ["LOOP"] #}during={{item}}{# endforeach #} after={{local:item}}"#;
         assert_eq!(
             eval_with_ctx(src, &mut ctx),
             "before=HOST_VALUE during=LOOP after=HOST_VALUE"
         );
+    }
+
+    #[test]
+    fn test_foreach_bare_and_local_scope_compat() {
+        // Both {{item}} and {{local:item}} resolve the loop binding
+        assert_eq!(
+            eval_simple(r#"{# foreach x in ["ok"] #}bare={{x}} scoped={{local:x}}{# endforeach #}"#),
+            "bare=ok scoped=ok"
+        );
+    }
+
+    #[test]
+    fn test_bare_variable_outside_loop_errors() {
+        let template = parser::parse("{{oops}}").expect("parse failed");
+        let mut ctx = SimpleContext::new();
+        let registry = Registry::new();
+        let result = evaluate(&template, &mut ctx, &registry);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, EvalErrorKind::UndefinedVariable);
+        assert!(err.message.contains("oops"));
+    }
+
+    #[test]
+    fn test_bare_variable_does_not_resolve_host_locals() {
+        // A bare variable should NOT fall through to the host context
+        let template = parser::parse("{{name}}").expect("parse failed");
+        let mut ctx = SimpleContext::new();
+        ctx.set("local", "name", "Alice");
+        let registry = Registry::new();
+        let result = evaluate(&template, &mut ctx, &registry);
+        assert!(result.is_err(), "bare {{name}} should not resolve host local:name");
     }
 }
 
@@ -1052,7 +1108,7 @@ mod whitespace_normalization_tests {
 
     #[test]
     fn test_foreach_standalone_no_extra_newlines() {
-        let src = "Before\n{# foreach item in [\"a\", \"b\", \"c\"] #}\n- {{local:item}}\n{# endforeach #}\nAfter";
+        let src = "Before\n{# foreach item in [\"a\", \"b\", \"c\"] #}\n- {{item}}\n{# endforeach #}\nAfter";
         let template = parser::parse(src).expect("parse failed");
         let mut ctx = SimpleContext::new();
         let registry = Registry::new();
@@ -1106,7 +1162,7 @@ mod whitespace_normalization_tests {
 
     #[test]
     fn test_foreach_with_indent() {
-        let src = "Items:\n{# foreach item in [\"sword\", \"shield\"] #}\n  - {{local:item}}\n{# endforeach #}\nDone";
+        let src = "Items:\n{# foreach item in [\"sword\", \"shield\"] #}\n  - {{item}}\n{# endforeach #}\nDone";
         let template = parser::parse(src).expect("parse failed");
         let mut ctx = SimpleContext::new();
         let registry = Registry::new();
@@ -1118,7 +1174,7 @@ mod whitespace_normalization_tests {
     fn test_nested_if_in_foreach() {
         let mut ctx = SimpleContext::new();
         ctx.set("global", "flag", Value::Bool(true));
-        let src = "{# foreach item in [\"a\", \"b\"] #}\n{# if {{global:flag}} #}\n{{local:item}}!\n{# endif #}\n{# endforeach #}";
+        let src = "{# foreach item in [\"a\", \"b\"] #}\n{# if {{global:flag}} #}\n{{item}}!\n{# endif #}\n{# endforeach #}";
         let template = parser::parse(src).expect("parse failed");
         let registry = Registry::new();
         let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -1205,7 +1261,7 @@ mod options_tests {
     fn test_node_evaluation_limit() {
         // A simple template that exceeds a very low limit
         let src =
-            r#"{# foreach item in ["a", "b", "c", "d", "e"] #}{{local:item}}{# endforeach #}"#;
+            r#"{# foreach item in ["a", "b", "c", "d", "e"] #}{{item}}{# endforeach #}"#;
         let template = parser::parse(src).expect("parse failed");
         let mut ctx = SimpleContext::new();
         let registry = Registry::new();
@@ -1233,7 +1289,7 @@ mod options_tests {
 
     #[test]
     fn test_iteration_limit() {
-        let src = r#"{# foreach item in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"] #}{{local:item}}{# endforeach #}"#;
+        let src = r#"{# foreach item in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"] #}{{item}}{# endforeach #}"#;
         let template = parser::parse(src).expect("parse failed");
         let mut ctx = SimpleContext::new();
         let registry = Registry::new();
@@ -1249,7 +1305,7 @@ mod options_tests {
 
     #[test]
     fn test_iteration_limit_sufficient() {
-        let src = r#"{# foreach item in ["a", "b", "c"] #}{{local:item}}{# endforeach #}"#;
+        let src = r#"{# foreach item in ["a", "b", "c"] #}{{item}}{# endforeach #}"#;
         let template = parser::parse(src).expect("parse failed");
         let mut ctx = SimpleContext::new();
         let registry = Registry::new();
@@ -1261,7 +1317,7 @@ mod options_tests {
 
     #[test]
     fn test_cancellation() {
-        let src = r#"{# foreach item in ["a", "b", "c"] #}{{local:item}}{# endforeach #}"#;
+        let src = r#"{# foreach item in ["a", "b", "c"] #}{{item}}{# endforeach #}"#;
         let template = parser::parse(src).expect("parse failed");
         let mut ctx = SimpleContext::new();
         let registry = Registry::new();
@@ -1298,6 +1354,18 @@ mod options_tests {
         let opts = EvalOptions::new().lenient(true);
         let result = evaluate_with_options(&template, &mut ctx, &registry, opts).unwrap();
         assert_eq!(result, "Hello, {{global:missing}}!");
+    }
+
+    #[test]
+    fn test_lenient_undefined_bare_variable() {
+        let src = "Hello, {{missing}}!";
+        let template = parser::parse(src).expect("parse failed");
+        let mut ctx = SimpleContext::new();
+        let registry = Registry::new();
+
+        let opts = EvalOptions::new().lenient(true);
+        let result = evaluate_with_options(&template, &mut ctx, &registry, opts).unwrap();
+        assert_eq!(result, "Hello, {{missing}}!");
     }
 
     #[test]

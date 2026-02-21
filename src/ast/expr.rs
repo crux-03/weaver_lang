@@ -36,15 +36,14 @@ pub enum ExprKind {
     },
 
     /// Unary operation: !condition, -number
-    UnaryOp {
-        op: UnaryOp,
-        operand: Box<Expr>,
-    },
+    UnaryOp { op: UnaryOp, operand: Box<Expr> },
 }
 
 #[derive(Debug, Clone)]
 pub struct VariableRef {
-    pub scope: String,
+    /// `None` for bare loop variables (`{{item}}`), `Some` for scoped
+    /// variables (`{{global:name}}`).
+    pub scope: Option<String>,
     pub name: String,
 }
 
