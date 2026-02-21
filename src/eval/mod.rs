@@ -656,10 +656,16 @@ fn check_standalone(nodes: &[Node], idx: usize) -> StandaloneInfo {
         (true, 0)
     } else {
         match &nodes[idx - 1].node {
-            NodeKind::Literal(text) => match trailing_ws_after_newline(text) {
-                Some(ws) => (true, ws),
-                None => (false, 0),
-            },
+            NodeKind::Literal(text) => {
+                if text.is_empty() {
+                    (true, 0)
+                } else {
+                    match trailing_ws_after_newline(text) {
+                        Some(ws) => (true, ws),
+                        None => (false, 0),
+                    }
+                }
+            }
             _ => (false, 0),
         }
     };
@@ -1173,14 +1179,17 @@ Title bestowed: {{local:title}}
 {# else #}
 {{global:name}} wanders the realm, class unknown.
 {# endif #}
-
-After the block.";
+$[set_var(\"local:power\", @[math.mul(a: {{global:hp}}, b: 1.5)])]
+{# if {{local:power}} > 100 #}
+$[set_var(\"local:title\", \"Test\")]
+Epic test title: {{local:title}}
+{# endif #}";
 
         let template = parser::parse(src).expect("parse failed");
         let result = evaluate(&template, &mut ctx, &registry).unwrap();
         assert_eq!(
             result,
-            "The mage known as Traveler channels arcane energy.\nTheir power level: 150\nTitle bestowed: Archmage\n\nAfter the block."
+            "The mage known as Traveler channels arcane energy.\nTheir power level: 150\nTitle bestowed: Archmage\nEpic test title: Test\n"
         );
     }
 }
