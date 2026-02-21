@@ -1649,8 +1649,8 @@ mod expr_eval_tests {
 
     #[test]
     fn test_expr_chained_arithmetic() {
-        // Left-to-right: (1 + 2) * 3 = 9 (no precedence yet)
-        assert_eq!(eval_expr("1 + 2 * 3"), Value::Number(9.0));
+        // Left-to-right: 1 + (2 * 3) = 7
+        assert_eq!(eval_expr("1 + 2 * 3"), Value::Number(7.0));
     }
 
     #[test]
@@ -1791,8 +1791,8 @@ mod expr_eval_tests {
         let registry = Registry::new();
         assert_eq!(
             eval_expr_ctx("{{char:base_hp}} + {{char:level}} * 5", &mut ctx, &registry,),
-            // Left-to-right: (50 + 10) * 5 = 300
-            Value::Number(300.0)
+            // Precedence-climbing: 50 + (10 * 5) = 100
+            Value::Number(100.0)
         );
     }
 

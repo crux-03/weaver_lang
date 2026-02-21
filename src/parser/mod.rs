@@ -74,7 +74,10 @@ pub fn parse(source: &str) -> Result<Template, Vec<ParseError>> {
 /// ```
 pub fn parse_expr(source: &str) -> Result<Expr, Vec<ParseError>> {
     let pairs = WeaverParser::parse(Rule::expr, source).map_err(|e| {
-        vec![ParseError::new(pest_span_to_span(&e), format!("expression parse error: {e}"))]
+        vec![ParseError::new(
+            pest_span_to_span(&e),
+            format!("expression parse error: {e}"),
+        )]
     })?;
     let pair = pairs.into_iter().next().unwrap();
     build_expr(pair)
@@ -145,7 +148,10 @@ fn build_variable(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<Par
             let mut parts = inner.into_inner();
             let scope = parts.next().unwrap().as_str().to_string();
             let name = parts.next().unwrap().as_str().to_string();
-            Ok(ExprKind::Variable(VariableRef { scope: Some(scope), name }))
+            Ok(ExprKind::Variable(VariableRef {
+                scope: Some(scope),
+                name,
+            }))
         }
         Rule::bare_var => {
             let name = inner.into_inner().next().unwrap().as_str().to_string();
@@ -239,18 +245,9 @@ fn build_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>
         return Ok(left);
     }
 
-    // Build binary expression tree (left-to-right)
-    for (op, right) in ops {
-        let merged_span = left.span.merge(right.span);
-        left = Spanned::new(
-            ExprKind::BinaryOp {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            },
-            merged_span,
-        );
-    }
+    // Build binary expression tree with operator precedence
+    let (result, _) = fold_binary(left, &ops, 0, 0);
+    left = result;
 
     Ok(left)
 }
@@ -421,6 +418,46 @@ fn build_foreach_block(pair: pest::iterators::Pair<Rule>) -> Result<ForEachBlock
 }
 
 // -- Helpers -------------------------------------------------------------
+
+/// Precedence-climbing parser over a flat `(BinOp, Expr)` list.
+///
+/// Starting from `left` and position `pos` in `ops`, consumes operators
+/// whose precedence is ≥ `min_prec`. Higher-precedence operators on the
+/// right side are folded first, producing the correct tree shape.
+///
+/// For example, `a + b * c + d` with standard precedence yields
+/// `(a + (b * c)) + d` rather than the naive left-fold `((a + b) * c) + d`.
+fn fold_binary(
+    mut left: Expr,
+    ops: &[(BinOp, Expr)],
+    mut pos: usize,
+    min_prec: u8,
+) -> (Expr, usize) {
+    while pos < ops.len() && ops[pos].0.precedence() >= min_prec {
+        let op = ops[pos].0;
+        let mut right = ops[pos].1.clone();
+        pos += 1;
+
+        // Fold any following higher-precedence operators into the right side
+        while pos < ops.len() && ops[pos].0.precedence() > op.precedence() {
+            let (new_right, new_pos) = fold_binary(right, ops, pos, ops[pos].0.precedence());
+            right = new_right;
+            pos = new_pos;
+        }
+
+        let merged_span = left.span.merge(right.span);
+        left = Spanned::new(
+            ExprKind::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            },
+            merged_span,
+        );
+    }
+
+    (left, pos)
+}
 
 fn split_dotted_name(dotted: &str) -> (String, String) {
     if let Some(pos) = dotted.rfind('.') {

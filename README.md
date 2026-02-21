@@ -1,4 +1,4 @@
-# weaver-lang
+# The Weaver Language
 
 A template language for procedural content generation in Rust. Parse text with embedded expressions, control flow, and host-defined callables, then evaluate it into a final string.
 
@@ -47,6 +47,17 @@ assert_eq!(template.evaluate(&mut ctx, &registry).unwrap(), "HP: 42");
 ```
 
 ## Syntax reference
+
+### Overview
+| type       | syntax                                                |
+|------------|-------------------------------------------------------|
+| variables  | `{{namespace:value}}`                                 |
+| processors | `@[namespace.name(foo: value1, bar: value2)]`         |
+| commands   | `$[name(foo, bar)]`                                   |
+| triggers   | `<trigger id="some_id">`                              |
+| documents  | `[[some_id]]`                                         |
+| if/else    | `{# if foo == bar #} baz {# endif #}`                 |
+| foreach    | `{# foreach foo in bar #} - {{foo}} {# endforeach #}` |
 
 ### Variables
 
@@ -105,7 +116,7 @@ Both are expressions — they can appear in arrays, processor arguments, conditi
 {# endif #}
 
 {# foreach item in ["sword", "shield", "potion"] #}
-  - {{local:item}}
+  - {{item}}
 {# endforeach #}
 ```
 
@@ -119,9 +130,11 @@ Expressions appear in conditions, arguments, and inline. Types are preserved int
 **Logical:** `&&`, `||`, `!`
 **Arithmetic:** `+`, `-`, `*`, `/`
 
-`+` concatenates when either operand is a string. Division by zero returns an error. Operator precedence is flat left-to-right — use parentheses for clarity: `(a + b) * c`.
+`+` concatenates when either operand is a string. Division by zero returns an error.
 
 **Truthiness:** empty string, `0`, `false`, empty array, and `none` are falsy. Everything else is truthy.
+
+**Precedence** (highest to lowest): unary (!, -), arithmetic (*, /, +, -), comparison (==, !=, <, >, <=, >=), logical (&&, ||). Parentheses override precedence.
 
 ## Registering processors and commands
 
@@ -299,9 +312,8 @@ let err = EvalError::host_error("failed to load entry").with_source(io_err);
 
 ## Known limitations
 
-- Operator precedence is flat left-to-right. Use parentheses: `(a + b) * c`.
 - All numbers are `f64`. Large integers above 2^53 lose precision.
-- No assignment syntax in the language. Variable mutation goes through commands.
+- No assignment syntax in the language. Variable mutation goes through commands which hosts need to define.
 - Document evaluation depends on the host's `resolve_document` implementation.
 
 ## Dependencies

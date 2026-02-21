@@ -98,8 +98,6 @@ pub enum BinOp {
 }
 
 impl BinOp {
-    /// Not yet used
-    #[allow(unused)]
     pub fn precedence(&self) -> u8 {
         match self {
             BinOp::Or => 1,

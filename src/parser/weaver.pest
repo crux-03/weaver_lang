@@ -1,40 +1,38 @@
-//
+// 
 // weaver-lang grammar
-//
+// 
 // Two layers: template (top-level, free-form text with embedded constructs)
 // and expression (typed values inside constructs).
-//
+// 
 // Template parsing is NOT whitespace-insensitive. Raw text matters.
 // Expression parsing (inside delimiters) IS whitespace-insensitive.
 
 // ── Top-level ───────────────────────────────────────────────────────────
 
-template = { SOI ~ node* ~ EOI }
+template        = { SOI ~ node* ~ EOI }
+expr_standalone = { SOI ~ ws ~ expr ~ ws ~ EOI }
 
 node = _{
     if_block
-    | foreach_block
-    | expression_node
-    | command_node
-    | literal_text
+  | foreach_block
+  | expression_node
+  | command_node
+  | literal_text
 }
 
 /// Raw text — everything that isn't a weaver construct.
 /// Matches one or more characters that don't start a construct.
 literal_text = @{
-    (
-        !( "{{" | "{#" | "@[" | "$[" | "<trigger" | "[[" )
-        ~ ANY
-    )+
+    (!("{{" | "{#" | "@[" | "$[" | "<trigger" | "[[") ~ ANY)+
 }
 
 // ── Expression nodes (template-level, result gets string-coerced) ───────
 
 expression_node = _{
     variable
-    | processor_call
-    | trigger
-    | document_ref
+  | processor_call
+  | trigger
+  | document_ref
 }
 
 // ── Command node (template-level, return value is optional) ─────────────
@@ -43,7 +41,7 @@ command_node = { command_call }
 
 // ── Variables: {{scope:name}} or {{name}} (bare loop binding) ───────────
 
-variable = { "{{" ~ ws ~ (scoped_var | bare_var) ~ ws ~ "}}" }
+variable   = { "{{" ~ ws ~ (scoped_var | bare_var) ~ ws ~ "}}" }
 scoped_var = { identifier ~ ":" ~ identifier }
 bare_var   = { identifier }
 
@@ -80,10 +78,7 @@ document_ref = {
 // ── Control flow ────────────────────────────────────────────────────────
 
 if_block = {
-    if_open ~ node* ~
-    elif_branch* ~
-    else_branch? ~
-    if_close
+    if_open ~ node* ~ elif_branch* ~ else_branch? ~ if_close
 }
 
 if_open  = _{ "{#" ~ ws ~ "if" ~ ws ~ expr ~ ws ~ "#}" }
@@ -109,25 +104,24 @@ foreach_close = _{ "{#" ~ ws ~ "endforeach" ~ ws ~ "#}" }
 // This layer is whitespace-insensitive (ws between tokens).
 
 expr = { unary_expr ~ (ws ~ bin_op ~ ws ~ unary_expr)* }
-expr_standalone = { SOI ~ ws ~ expr ~ ws ~ EOI }
 
 unary_expr = {
     unary_op ~ ws ~ atom
-    | atom
+  | atom
 }
 
 atom = {
     "(" ~ ws ~ expr ~ ws ~ ")"
-    | array_literal
-    | variable
-    | processor_call
-    | command_call
-    | trigger
-    | document_ref
-    | bool_literal
-    | none_literal
-    | number
-    | quoted_string
+  | array_literal
+  | variable
+  | processor_call
+  | command_call
+  | trigger
+  | document_ref
+  | bool_literal
+  | none_literal
+  | number
+  | quoted_string
 }
 
 array_literal = { "[" ~ ws ~ (expr ~ (ws ~ "," ~ ws ~ expr)*)? ~ ws ~ "]" }
@@ -135,9 +129,18 @@ array_literal = { "[" ~ ws ~ (expr ~ (ws ~ "," ~ ws ~ expr)*)? ~ ws ~ "]" }
 // ── Operators ───────────────────────────────────────────────────────────
 
 bin_op = {
-    "==" | "!=" | "<=" | ">=" | "<" | ">"
-    | "&&" | "||"
-    | "+" | "-" | "*" | "/"
+    "=="
+  | "!="
+  | "<="
+  | ">="
+  | "<"
+  | ">"
+  | "&&"
+  | "||"
+  | "+"
+  | "-"
+  | "*"
+  | "/"
 }
 
 unary_op = { "!" | "-" }
