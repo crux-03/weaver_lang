@@ -104,6 +104,12 @@ Evaluates to `Line before\nLine after`.
 
 Both are expressions — they can appear in arrays, processor arguments, conditions, etc.
 
+Triggers and documents are almost functionally identical, but they differ semantically:
+- Triggers are meant to mark another entry for activation. It should not return a value.
+- Documents replace the expression with the flat output of another entry.
+
+> Evaluation is not performed automatically for documents, and triggers won't be activated automatically. You need to implement this logic in your `EvalContext` implementation.
+
 ### Control flow
 
 ```
