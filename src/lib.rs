@@ -81,6 +81,8 @@ pub use eval::{
 };
 pub use parser::{parse, parse_expr};
 pub use registry::{ClosureCommand, ClosureProcessor, Registry, WeaverCommand, WeaverProcessor};
+#[cfg(feature = "macros")]
+pub use macros;
 
 /// Parse source text and evaluate it in a single step.
 ///
