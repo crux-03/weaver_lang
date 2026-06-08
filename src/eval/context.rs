@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use crate::ast::value::Value;
 use crate::error::EvalError;
 use crate::Registry;
@@ -20,7 +22,7 @@ use crate::Registry;
 /// (i.e. the triggered entry itself contains weaver-lang templates), the
 /// host is responsible for cycle detection and depth limiting. The
 /// evaluator does not track cross-entry recursion.
-pub trait EvalContext {
+pub trait EvalContext: Any {
     /// Look up a variable by scope and name.
     ///
     /// Return `Ok(None)` if the variable does not exist. The evaluator

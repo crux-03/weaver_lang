@@ -5,11 +5,12 @@ resolver = "2"
 [package]
 name = "weaver_lang"
 authors = ["crux03"]
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "A dynamic text evaluation language for procedural content generation"
 license = "MIT"
 repository = "https://github.com/crux-03/weaver_lang"
+rust-version = "1.86.0" # MSRV for upcasting
 
 [dependencies]
 pest = "=2.8.6"
