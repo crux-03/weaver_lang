@@ -558,6 +558,9 @@ fn parse_bin_op(s: &str) -> BinOp {
 //      or {# endforeach #}).
 //    - Leading \n from each block body's first literal (the newline after
 //      {# if #}, {# elif #}, {# else #}, {# foreach #}).
+//    - Trailing indent from each block body's last literal (the spaces
+//      before {# elif #}, {# else #}, {# endif #}, {# endforeach #} when
+//      those tags are indented on their own line).
 
 fn normalize_whitespace(template: &mut Template) {
     // First, unconditionally strip the leading newline from every block
@@ -598,17 +601,38 @@ fn strip_block_body_newlines(node: &mut Node) {
     match &mut node.node {
         NodeKind::IfBlock(block) => {
             strip_body_leading_newline(&mut block.body);
+            strip_body_trailing_indent(&mut block.body);
             for elif in &mut block.elif_branches {
                 strip_body_leading_newline(&mut elif.body);
+                strip_body_trailing_indent(&mut elif.body);
             }
             if let Some(else_body) = &mut block.else_body {
                 strip_body_leading_newline(else_body);
+                strip_body_trailing_indent(else_body);
             }
         }
         NodeKind::ForEach(block) => {
             strip_body_leading_newline(&mut block.body);
+            strip_body_trailing_indent(&mut block.body);
         }
         _ => {}
+    }
+}
+
+/// Strip trailing spaces/tabs after the final `\n` from a block body's
+/// last literal node. This whitespace sits between a newline and the
+/// transition/closing tag that follows the body ({# elif #}, {# else #},
+/// {# endif #}, {# endforeach #}) — i.e. it is the indent of a tag line
+/// and never content. The `\n` guard means inline tags
+/// (`stuff {# endif #}`) are untouched, since their preceding text is
+/// not whitespace-only after the last newline.
+fn strip_body_trailing_indent(template: &mut Template) {
+    if let Some(last) = template.nodes.last_mut()
+        && let NodeKind::Literal(text) = &mut last.node
+        && let Some(ws) = trailing_ws_after_newline_norm(text)
+        && ws > 0
+    {
+        text.truncate(text.len() - ws);
     }
 }
 
@@ -633,6 +657,16 @@ fn normalize_standalone_blocks(nodes: &mut [Node]) {
                         // Empty literal (e.g. from a prior strip) — treat
                         // like being at the start of a line.
                         (true, 0)
+                    } else if i == 1 && text.bytes().all(|b| b == b' ' || b == b'\t') {
+                        // Whitespace-only literal with no newline at the
+                        // START of the node list — the residue left after
+                        // strip_block_body_newlines removed the enclosing
+                        // tag line's newline, i.e. exactly this line's
+                        // indent. Treat it as line-start. (At any other
+                        // position a whitespace-only literal is mid-line
+                        // spacing between inline constructs and must not
+                        // count.)
+                        (true, text.len())
                     } else if let Some(ws) = trailing_ws_after_newline_norm(text) {
                         (true, ws)
                     } else {

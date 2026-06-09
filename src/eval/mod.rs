@@ -327,11 +327,41 @@ impl Evaluator {
         let mut i = 0;
         while i < len {
             match &nodes[i].node {
-                NodeKind::Command(_) => {
-                    // Check if this command is standalone on its line.
-                    let info = check_standalone(nodes, i);
+                NodeKind::Command(_) | NodeKind::Expression(_) => {
+                    // Check if this node is standalone on its line.
+                    let info = check_standalone(&output, nodes, i);
 
-                    if info.is_standalone {
+                    // Standalone commands always consume their line (their
+                    // return value is discarded). Standalone expressions
+                    // consume their line only when they render to nothing —
+                    // empty or whitespace-only, e.g. a `none` variable or an
+                    // empty document. A standalone expression that renders
+                    // content keeps its line exactly as written.
+                    let (consume_line, skip_newline) = if !info.is_standalone {
+                        let fragment = self.eval_node(&nodes[i], ctx, registry)?;
+                        output.push_str(&fragment);
+                        (false, false)
+                    } else if matches!(&nodes[i].node, NodeKind::Command(_)) {
+                        // Evaluate the command (discard output)
+                        self.eval_node(&nodes[i], ctx, registry)?;
+                        (true, true)
+                    } else {
+                        let fragment = self.eval_node(&nodes[i], ctx, registry)?;
+                        if fragment.trim().is_empty() {
+                            (true, true)
+                        } else {
+                            // The fragment replaces the line's content. If it
+                            // already ends with a newline (e.g. a multi-line
+                            // document include), it supplies the line
+                            // terminator itself — skip the line's own
+                            // trailing newline to avoid doubling it.
+                            let supplies_newline = fragment.ends_with('\n');
+                            output.push_str(&fragment);
+                            (false, supplies_newline)
+                        }
+                    };
+
+                    if consume_line {
                         // Trim trailing whitespace (indent) from output
                         if info.ws_only_trim > 0 && output.len() >= info.ws_only_trim {
                             let new_len = output.len() - info.ws_only_trim;
@@ -348,9 +378,9 @@ impl Evaluator {
                                 output.pop();
                             }
                         }
+                    }
 
-                        // Evaluate the command (discard output)
-                        self.eval_node(&nodes[i], ctx, registry)?;
+                    if consume_line || skip_newline {
                         // Skip leading newline in the following literal
                         if i + 1 < len
                             && let NodeKind::Literal(text) = &nodes[i + 1].node
@@ -361,14 +391,11 @@ impl Evaluator {
                             continue;
                         }
 
-                        // If no following literal (command is at end), just skip
+                        // If no following literal (node is at end), just skip
+                        // past this node (already evaluated above).
                         i += 1;
                         continue;
                     }
-
-                    // Not standalone — evaluate and use return value as output
-                    let fragment = self.eval_node(&nodes[i], ctx, registry)?;
-                    output.push_str(&fragment);
                 }
                 _ => {
                     let fragment = self.eval_node(&nodes[i], ctx, registry)?;
@@ -722,34 +749,33 @@ struct StandaloneInfo {
     trim_preceding_newline: bool,
 }
 
-/// Check if the command at `idx` is standalone on its line.
-fn check_standalone(nodes: &[Node], idx: usize) -> StandaloneInfo {
+/// Check if the command or expression at `idx` is standalone on its line.
+///
+/// The preceding-context check is based on the rendered `output` so far
+/// rather than the preceding AST literal: the AST alone cannot tell a
+/// mid-line whitespace gap (`@[proc] $[cmd]`) apart from the line-start
+/// residue left behind after earlier lines were consumed (stripped tag
+/// lines, standalone commands). The output can — we are at a line start
+/// exactly when the output is empty or ends with a newline followed only
+/// by spaces/tabs.
+fn check_standalone(output: &str, nodes: &[Node], idx: usize) -> StandaloneInfo {
     let not_standalone = StandaloneInfo {
         is_standalone: false,
         ws_only_trim: 0,
         trim_preceding_newline: false,
     };
 
-    // Check preceding context: the preceding literal must end with \n
-    // followed by optional whitespace, OR the command must be the first node.
+    // Check preceding context: the rendered output so far must end at a
+    // line boundary — empty, or \n followed only by spaces/tabs. The
+    // trailing spaces/tabs are this line's indent (ws_only_trim).
     let at_start = idx == 0;
-    let (preceding_ok, ws_after_nl) = if at_start {
-        (true, 0)
-    } else {
-        match &nodes[idx - 1].node {
-            NodeKind::Literal(text) => {
-                if text.is_empty() {
-                    (true, 0)
-                } else {
-                    match trailing_ws_after_newline(text) {
-                        Some(ws) => (true, ws),
-                        None => (false, 0),
-                    }
-                }
-            }
-            _ => (false, 0),
-        }
-    };
+    let bytes = output.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+        end -= 1;
+    }
+    let preceding_ok = end == 0 || bytes[end - 1] == b'\n';
+    let ws_after_nl = bytes.len() - end;
 
     if !preceding_ok {
         return not_standalone;
@@ -790,27 +816,6 @@ fn check_standalone(nodes: &[Node], idx: usize) -> StandaloneInfo {
         is_standalone: true,
         ws_only_trim: ws_after_nl,
         trim_preceding_newline,
-    }
-}
-
-/// If the string ends with `\n` (or `\r\n`) followed by only spaces/tabs,
-/// return the count of whitespace-only bytes AFTER the newline.
-/// Returns `Some(0)` if the string ends with a bare newline and no trailing ws.
-fn trailing_ws_after_newline(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut i = bytes.len();
-
-    // Skip trailing spaces/tabs
-    while i > 0 && (bytes[i - 1] == b' ' || bytes[i - 1] == b'\t') {
-        i -= 1;
-    }
-
-    // Must find a newline
-    if i > 0 && bytes[i - 1] == b'\n' {
-        // ws_count = bytes after the \n
-        Some(bytes.len() - i)
-    } else {
-        None
     }
 }
 
@@ -1999,5 +2004,211 @@ mod expr_eval_tests {
 
         let result = eval_expr_value(&expr, &mut ctx, &registry).unwrap();
         assert_eq!(result, Value::Bool(true)); // !none == true
+    }
+}
+// ── Standalone line consumption tests ───────────────────────────────────
+
+#[cfg(test)]
+mod standalone_line_tests {
+    use super::*;
+    use crate::parser;
+    use crate::registry::{ClosureCommand, ClosureProcessor};
+
+    fn registry_with_noop() -> Registry {
+        let mut r = Registry::new();
+        r.register_command(ClosureCommand::new("noop", |_args| Ok(None)));
+        r
+    }
+
+    fn eval(src: &str, ctx: &mut SimpleContext, registry: &Registry) -> String {
+        let template = parser::parse(src).expect("parse failed");
+        evaluate(&template, ctx, registry).expect("eval failed")
+    }
+
+    // A command indented on its own line. The literal before it is
+    // whitespace-only with no newline (line start by construction), which
+    // the old check rejected.
+    #[test]
+    fn test_indented_command_at_start_is_standalone() {
+        let mut ctx = SimpleContext::new();
+        let registry = registry_with_noop();
+        assert_eq!(eval("  $[noop()]\nX", &mut ctx, &registry), "X");
+    }
+
+    #[test]
+    fn test_standalone_expr_rendering_none_consumes_line() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "gone", Value::None);
+        let registry = Registry::new();
+        assert_eq!(eval("A\n{{global:gone}}\nB", &mut ctx, &registry), "A\nB");
+    }
+
+    #[test]
+    fn test_standalone_expr_rendering_none_consumes_indent() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "gone", Value::None);
+        let registry = Registry::new();
+        assert_eq!(eval("A\n  {{global:gone}}\nB", &mut ctx, &registry), "A\nB");
+    }
+
+    #[test]
+    fn test_standalone_expr_rendering_whitespace_consumes_line() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "blanks", "   ");
+        let registry = Registry::new();
+        assert_eq!(eval("A\n{{global:blanks}}\nB", &mut ctx, &registry), "A\nB");
+    }
+
+    #[test]
+    fn test_standalone_expr_with_content_keeps_line() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "name", "Alice");
+        let registry = Registry::new();
+        assert_eq!(
+            eval("A\n  {{global:name}}\nB", &mut ctx, &registry),
+            "A\n  Alice\nB"
+        );
+    }
+
+    #[test]
+    fn test_inline_empty_expr_untouched() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "gone", Value::None);
+        let registry = Registry::new();
+        assert_eq!(
+            eval("A: {{global:gone}}!\nB", &mut ctx, &registry),
+            "A: !\nB"
+        );
+    }
+
+    #[test]
+    fn test_standalone_empty_expr_at_end() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "gone", Value::None);
+        let registry = Registry::new();
+        assert_eq!(eval("A\n  {{global:gone}}", &mut ctx, &registry), "A");
+    }
+
+    #[test]
+    fn test_consecutive_empty_lines_collapse() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "a", Value::None);
+        ctx.set("global", "b", Value::None);
+        let registry = Registry::new();
+        assert_eq!(
+            eval(
+                "<Encounter>\n  {{global:a}}\n  {{global:b}}\n</Encounter>",
+                &mut ctx,
+                &registry
+            ),
+            "<Encounter>\n</Encounter>"
+        );
+    }
+
+    #[test]
+    fn test_indented_commands_then_content() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "result", "<maid_class>ok</maid_class>");
+        let registry = registry_with_noop();
+        assert_eq!(
+            eval(
+                "    $[noop()]\n    $[noop()]\n  {{global:result}}\n",
+                &mut ctx,
+                &registry
+            ),
+            "  <maid_class>ok</maid_class>\n"
+        );
+    }
+
+    // ── Tests below exercise the parser fixes (indented block tags) ──
+
+    #[test]
+    fn test_indented_nested_if_else() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "outer", Value::Bool(true));
+        ctx.set("global", "inner", Value::Bool(false));
+        let registry = Registry::new();
+        let src = "<Tag>\n{# if {{global:outer}} #}\n  {# if {{global:inner}} #}\n  A\n  {# else #}\n  B\n  {# endif #}\n{# else #}\nC\n{# endif #}\n</Tag>";
+        assert_eq!(eval(src, &mut ctx, &registry), "<Tag>\n  B\n</Tag>");
+    }
+
+    #[test]
+    fn test_indented_elif_chain() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "x", Value::Number(2.0));
+        let registry = Registry::new();
+        let src = "A\n  {# if {{global:x}} == 1 #}\n  one\n  {# elif {{global:x}} == 2 #}\n  two\n  {# else #}\n  other\n  {# endif #}\nB";
+        assert_eq!(eval(src, &mut ctx, &registry), "A\n  two\nB");
+    }
+
+    #[test]
+    fn test_indented_command_inside_indented_if() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "go", Value::Bool(true));
+        let registry = registry_with_noop();
+        let src = "X\n  {# if {{global:go}} #}\n    $[noop()]\n  done\n  {# endif #}\nY";
+        assert_eq!(eval(src, &mut ctx, &registry), "X\n  done\nY");
+    }
+
+    #[test]
+    fn test_multiline_fragment_supplies_line_terminator() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "doc", "line1\nline2\n");
+        let registry = Registry::new();
+        assert_eq!(
+            eval("A\n{{global:doc}}\nB", &mut ctx, &registry),
+            "A\nline1\nline2\nB"
+        );
+    }
+
+    #[test]
+    fn test_singleline_fragment_keeps_line_newline() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "doc", "line1");
+        let registry = Registry::new();
+        assert_eq!(
+            eval("A\n{{global:doc}}\nB", &mut ctx, &registry),
+            "A\nline1\nB"
+        );
+    }
+    #[test]
+    fn test_inline_processor_then_command() {
+        let mut registry = Registry::new();
+        registry.register_command(ClosureCommand::new("double", |args| {
+            let n = args.get(0).and_then(|v| v.as_number()).unwrap_or(0.0);
+            Ok(Some(Value::Number(n * 2.0)))
+        }));
+        registry.register_processor(ClosureProcessor::new("test", "bracket", |props| {
+            let t = props
+                .get("text")
+                .and_then(|v| v.as_string())
+                .unwrap_or("")
+                .to_string();
+            Ok(Value::String(format!("[{t}]")))
+        }));
+        let mut ctx = SimpleContext::new();
+        assert_eq!(
+            eval(
+                r#"@[test.bracket(text: "hi")] $[double(5)]"#,
+                &mut ctx,
+                &registry
+            ),
+            "[hi] 10"
+        );
+    }
+
+    #[test]
+    fn test_inline_var_then_command() {
+        let mut registry = Registry::new();
+        registry.register_command(ClosureCommand::new("double", |args| {
+            let n = args.get(0).and_then(|v| v.as_number()).unwrap_or(0.0);
+            Ok(Some(Value::Number(n * 2.0)))
+        }));
+        let mut ctx = SimpleContext::new();
+        ctx.set("global", "x", "A");
+        assert_eq!(
+            eval("{{global:x}} $[double(5)]", &mut ctx, &registry),
+            "A 10"
+        );
     }
 }
