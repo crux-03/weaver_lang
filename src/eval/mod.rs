@@ -482,7 +482,8 @@ impl Evaluator {
             }
 
             ExprKind::Trigger(trig) => {
-                let result = ctx.fire_trigger(&trig.entry_id, registry).map_err(|e| {
+                let entry_id = self.eval_id_expr(&trig.entry_id, ctx, registry)?;
+                let result = ctx.fire_trigger(&entry_id, registry).map_err(|e| {
                     if e.span.is_none() {
                         e.with_span(span)
                     } else {
@@ -493,27 +494,26 @@ impl Evaluator {
                 if self.options.lenient {
                     result
                         .map(Value::String)
-                        .or_else(|_| Ok(Value::String(reconstruct_trigger(trig))))
+                        .or_else(|_| Ok(Value::String(reconstruct_trigger(&entry_id))))
                 } else {
                     Ok(Value::String(result?))
                 }
             }
 
             ExprKind::Document(doc) => {
-                let result = ctx
-                    .resolve_document(&doc.document_id, registry)
-                    .map_err(|e| {
-                        if e.span.is_none() {
-                            e.with_span(span)
-                        } else {
-                            e
-                        }
-                    });
+                let document_id = self.eval_id_expr(&doc.document_id, ctx, registry)?;
+                let result = ctx.resolve_document(&document_id, registry).map_err(|e| {
+                    if e.span.is_none() {
+                        e.with_span(span)
+                    } else {
+                        e
+                    }
+                });
 
                 if self.options.lenient {
                     result
                         .map(Value::String)
-                        .or_else(|_| Ok(Value::String(reconstruct_document(doc))))
+                        .or_else(|_| Ok(Value::String(reconstruct_document(&document_id))))
                 } else {
                     Ok(Value::String(result?))
                 }
@@ -529,6 +529,23 @@ impl Evaluator {
                 let val = self.eval_expr(operand, ctx, registry)?;
                 eval_unary_op(*op, &val, span)
             }
+        }
+    }
+
+    /// Evaluate a trigger/document id expression and require it to be a
+    /// string. A non-string id (e.g. `none`, a number, an array) is a type
+    /// error rather than being silently coerced — this keeps the common
+    /// `{{x}} != none` guard meaningful.
+    fn eval_id_expr(
+        &mut self,
+        id: &Expr,
+        ctx: &mut impl EvalContext,
+        registry: &Registry,
+    ) -> Result<String, EvalError> {
+        let val = self.eval_expr(id, ctx, registry)?;
+        match val {
+            Value::String(s) => Ok(s),
+            other => Err(EvalError::type_error("string", other.type_name()).with_span(id.span)),
         }
     }
 
@@ -682,12 +699,12 @@ fn reconstruct_command(cmd: &CommandCall) -> String {
     format!("$[{}(...)]", cmd.name)
 }
 
-fn reconstruct_trigger(trig: &TriggerRef) -> String {
-    format!("<trigger id=\"{}\">", trig.entry_id)
+fn reconstruct_trigger(entry_id: &str) -> String {
+    format!("<trigger id=\"{entry_id}\">")
 }
 
-fn reconstruct_document(doc: &DocumentRef) -> String {
-    format!("[[{}]]", doc.document_id)
+fn reconstruct_document(document_id: &str) -> String {
+    format!("[[{document_id}]]")
 }
 
 // ── Standalone command detection ────────────────────────────────────────
@@ -1543,7 +1560,7 @@ mod options_tests {
 mod expr_eval_tests {
     use super::*;
     use crate::parser;
-    use crate::registry::{ClosureProcessor};
+    use crate::registry::ClosureProcessor;
 
     fn eval_expr(source: &str) -> Value {
         let expr = parser::parse_expr(source).expect("parse_expr failed");

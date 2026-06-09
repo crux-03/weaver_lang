@@ -1,14 +1,17 @@
-#[allow(unused_imports)]
-use weaver_lang::{evaluate, EvalContext, EvalError, EvalErrorKind, Registry, SimpleContext, Value};
 use macros::{weaver_command, weaver_processor};
+#[allow(unused_imports)]
+use weaver_lang::{
+    EvalContext, EvalError, EvalErrorKind, Registry, SimpleContext, Value, evaluate,
+};
 
 // ── Basic processor: picks first item from an array ─────────────────────
 
 #[weaver_processor(namespace = "test", name = "first")]
 fn first_item(items: Vec<Value>) -> Result<Value, EvalError> {
-    items.into_iter().next().ok_or_else(|| {
-        EvalError::new(EvalErrorKind::HostError, "empty array")
-    })
+    items
+        .into_iter()
+        .next()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::HostError, "empty array"))
 }
 
 // ── String processor: wraps text in brackets ────────────────────────────
@@ -53,10 +56,8 @@ fn make_registry() -> Registry {
 
 #[test]
 fn test_macro_array_processor() {
-    let template = weaver_lang::parse(
-        r#"@[test.first(items: ["alpha", "beta", "gamma"])]"#,
-    )
-    .unwrap();
+    let template =
+        weaver_lang::parse(r#"@[test.first(items: ["alpha", "beta", "gamma"])]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -65,10 +66,7 @@ fn test_macro_array_processor() {
 
 #[test]
 fn test_macro_string_processor() {
-    let template = weaver_lang::parse(
-        r#"@[test.bracket(text: "hello")]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"@[test.bracket(text: "hello")]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -77,10 +75,7 @@ fn test_macro_string_processor() {
 
 #[test]
 fn test_macro_number_processor() {
-    let template = weaver_lang::parse(
-        r#"@[test.double(n: 21)]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"@[test.double(n: 21)]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -89,10 +84,7 @@ fn test_macro_number_processor() {
 
 #[test]
 fn test_macro_bool_processor() {
-    let template = weaver_lang::parse(
-        r#"@[test.yesno(value: true)]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"@[test.yesno(value: true)]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -101,10 +93,7 @@ fn test_macro_bool_processor() {
 
 #[test]
 fn test_macro_multi_param_processor() {
-    let template = weaver_lang::parse(
-        r#"@[test.repeat(text: "ab", count: 3)]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"@[test.repeat(text: "ab", count: 3)]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -114,10 +103,7 @@ fn test_macro_multi_param_processor() {
 #[test]
 fn test_macro_type_validation_rejects_wrong_type() {
     // Pass a number where a string is expected
-    let template = weaver_lang::parse(
-        r#"@[test.bracket(text: 42)]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"@[test.bracket(text: 42)]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_registry();
     let result = evaluate(&template, &mut ctx, &registry);
@@ -130,10 +116,7 @@ fn test_macro_type_validation_rejects_wrong_type() {
 #[test]
 fn test_macro_missing_required_property() {
     // Call repeat without the "count" property
-    let template = weaver_lang::parse(
-        r#"@[test.repeat(text: "ab")]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"@[test.repeat(text: "ab")]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_registry();
     let result = evaluate(&template, &mut ctx, &registry);
@@ -144,10 +127,7 @@ fn test_macro_missing_required_property() {
 
 #[test]
 fn test_macro_processor_with_variable_input() {
-    let template = weaver_lang::parse(
-        r#"@[test.bracket(text: {{global:name}})]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"@[test.bracket(text: {{global:name}})]"#).unwrap();
     let mut ctx = SimpleContext::new();
     ctx.set("global", "name", "world");
     let registry = make_registry();
@@ -158,10 +138,9 @@ fn test_macro_processor_with_variable_input() {
 #[test]
 fn test_macro_processor_in_template_context() {
     // Use a macro-defined processor inside a larger template
-    let template = weaver_lang::parse(
-        r#"Result: @[test.double(n: 5)] and @[test.bracket(text: "done")]"#,
-    )
-    .unwrap();
+    let template =
+        weaver_lang::parse(r#"Result: @[test.double(n: 5)] and @[test.bracket(text: "done")]"#)
+            .unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -189,7 +168,11 @@ fn noop() -> Result<Option<Value>, EvalError> {
 // ── Command with ctx access: sets a variable ────────────────────────
 
 #[weaver_command(name = "set_var")]
-fn set_var(key: String, value: Value, ctx: &mut dyn EvalContext) -> Result<Option<Value>, EvalError> {
+fn set_var(
+    key: String,
+    value: Value,
+    ctx: &mut dyn EvalContext,
+) -> Result<Option<Value>, EvalError> {
     if let Some(pos) = key.find(':') {
         ctx.set_variable(&key[..pos], &key[pos + 1..], value)?;
     }
@@ -251,10 +234,7 @@ fn make_cmd_registry() -> Registry {
 
 #[test]
 fn test_cmd_macro_pure_command() {
-    let template = weaver_lang::parse(
-        r#"$[greet("world")]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"$[greet("world")]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_cmd_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -263,10 +243,7 @@ fn test_cmd_macro_pure_command() {
 
 #[test]
 fn test_cmd_macro_returns_none() {
-    let template = weaver_lang::parse(
-        r#"before$[noop()]after"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"before$[noop()]after"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_cmd_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -275,7 +252,8 @@ fn test_cmd_macro_returns_none() {
 
 #[test]
 fn test_cmd_macro_with_ctx_sets_variable() {
-    let src = "Name: {{global:name}}\n$[set_var(\"global:name\", \"Alice\")]\nNew name: {{global:name}}";
+    let src =
+        "Name: {{global:name}}\n$[set_var(\"global:name\", \"Alice\")]\nNew name: {{global:name}}";
     let template = weaver_lang::parse(src).unwrap();
     let mut ctx = SimpleContext::new();
     ctx.set("global", "name", "Sarah");
@@ -286,10 +264,7 @@ fn test_cmd_macro_with_ctx_sets_variable() {
 
 #[test]
 fn test_cmd_macro_with_ctx_reads_variable() {
-    let template = weaver_lang::parse(
-        r#"$[get_var("global:score")]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"$[get_var("global:score")]"#).unwrap();
     let mut ctx = SimpleContext::new();
     ctx.set("global", "score", 42i64);
     let registry = make_cmd_registry();
@@ -299,10 +274,7 @@ fn test_cmd_macro_with_ctx_reads_variable() {
 
 #[test]
 fn test_cmd_macro_number_arg() {
-    let template = weaver_lang::parse(
-        r#"$[double(21)]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"$[double(21)]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_cmd_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -311,10 +283,7 @@ fn test_cmd_macro_number_arg() {
 
 #[test]
 fn test_cmd_macro_bool_arg() {
-    let template = weaver_lang::parse(
-        r#"$[yesno(true)]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"$[yesno(true)]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_cmd_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -323,10 +292,7 @@ fn test_cmd_macro_bool_arg() {
 
 #[test]
 fn test_cmd_macro_array_arg() {
-    let template = weaver_lang::parse(
-        r#"$[first(["alpha", "beta"])]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"$[first(["alpha", "beta"])]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_cmd_registry();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
@@ -336,10 +302,7 @@ fn test_cmd_macro_array_arg() {
 #[test]
 fn test_cmd_macro_type_validation_rejects_wrong_type() {
     // Pass a number where a string is expected
-    let template = weaver_lang::parse(
-        r#"$[greet(42)]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"$[greet(42)]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_cmd_registry();
     let result = evaluate(&template, &mut ctx, &registry);
@@ -352,10 +315,7 @@ fn test_cmd_macro_type_validation_rejects_wrong_type() {
 #[test]
 fn test_cmd_macro_missing_required_arg() {
     // Call greet without any arguments
-    let template = weaver_lang::parse(
-        r#"$[greet()]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"$[greet()]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let registry = make_cmd_registry();
     let result = evaluate(&template, &mut ctx, &registry);
@@ -381,10 +341,7 @@ fn test_cmd_macro_in_template_with_processor() {
     let mut registry = make_cmd_registry();
     registry.register_processor(BracketProcessor);
 
-    let template = weaver_lang::parse(
-        r#"@[test.bracket(text: "hi")] $[double(5)]"#,
-    )
-    .unwrap();
+    let template = weaver_lang::parse(r#"@[test.bracket(text: "hi")] $[double(5)]"#).unwrap();
     let mut ctx = SimpleContext::new();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
     assert_eq!(result, "[hi] 10");

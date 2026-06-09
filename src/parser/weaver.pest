@@ -63,16 +63,39 @@ command_call = {
 
 arg_list = { expr ~ (ws ~ "," ~ ws ~ expr)* }
 
-// ── Triggers: <trigger id="entry-id"> ───────────────────────────────────
+// ── Triggers: <trigger id="entry-id"> or <trigger id={{var}}> ───────────
 
 trigger = {
-    "<trigger" ~ ws ~ "id" ~ ws ~ "=" ~ ws ~ quoted_string ~ ws ~ ">"
+    "<trigger" ~ ws ~ "id" ~ ws ~ "=" ~ ws ~ trigger_id ~ ws ~ ">"
 }
 
-// ── Documents: [[DOCUMENT_ID]] ──────────────────────────────────────────
+/// The id is either a string literal or an expression that evaluates to
+/// one. Bare binary expressions are NOT allowed here because `>` would be
+/// ambiguous with the closing delimiter — parenthesize instead:
+/// <trigger id=({{scope:base}} + "_suffix")>
+trigger_id = _{
+    quoted_string
+  | variable
+  | processor_call
+  | command_call
+  | "(" ~ ws ~ expr ~ ws ~ ")"
+}
+
+// ── Documents: [[DOCUMENT_ID]] or [[{{var}}]] ───────────────────────────
 
 document_ref = {
-    "[[" ~ ws ~ identifier ~ ws ~ "]]"
+    "[[" ~ ws ~ document_id ~ ws ~ "]]"
+}
+
+/// Note: in EXPRESSION position (not template position), `[[{{var}}]]`
+/// still parses as a nested array literal — array syntax takes precedence
+/// inside `atom`. Dynamic document ids are a template-level feature.
+document_id = _{
+    variable
+  | processor_call
+  | command_call
+  | "(" ~ ws ~ expr ~ ws ~ ")"
+  | identifier
 }
 
 // ── Control flow ────────────────────────────────────────────────────────

@@ -68,12 +68,17 @@ pub struct CommandCall {
 
 #[derive(Debug, Clone)]
 pub struct TriggerRef {
-    pub entry_id: String,
+    /// The target entry id. Evaluates to a string at runtime — either a
+    /// literal (`<trigger id="foo">`) or a dynamic expression
+    /// (`<trigger id={{scope:name}}>`).
+    pub entry_id: Box<Expr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct DocumentRef {
-    pub document_id: String,
+    /// The target document id. Evaluates to a string at runtime — either a
+    /// bare identifier (`[[FOO]]`) or a dynamic expression (`[[{{name}}]]`).
+    pub document_id: Box<Expr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

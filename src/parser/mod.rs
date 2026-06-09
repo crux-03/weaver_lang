@@ -209,15 +209,37 @@ fn build_command_call(pair: pest::iterators::Pair<Rule>) -> Result<CommandCall, 
 }
 
 fn build_trigger(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
-    let mut inner = pair.into_inner();
-    let entry_id = extract_string_content(inner.next().unwrap());
-    Ok(ExprKind::Trigger(TriggerRef { entry_id }))
+    let inner = pair.into_inner().next().unwrap();
+    let entry_id = build_id_expr(inner)?;
+    Ok(ExprKind::Trigger(TriggerRef {
+        entry_id: Box::new(entry_id),
+    }))
 }
 
 fn build_document_ref(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
-    let mut inner = pair.into_inner();
-    let document_id = inner.next().unwrap().as_str().to_string();
-    Ok(ExprKind::Document(DocumentRef { document_id }))
+    let inner = pair.into_inner().next().unwrap();
+    let document_id = build_id_expr(inner)?;
+    Ok(ExprKind::Document(DocumentRef {
+        document_id: Box::new(document_id),
+    }))
+}
+
+/// Build the id expression shared by triggers and documents.
+///
+/// A bare `identifier` (the `[[FOO]]` form) is synthesized into a string
+/// literal so the id is uniformly an `Expr`. The `expr` form (from the
+/// parenthesized escape hatch) recurses through the operator parser;
+/// everything else is a single atom.
+fn build_id_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>> {
+    let span = pair_span(&pair);
+    match pair.as_rule() {
+        Rule::identifier => Ok(Spanned::new(
+            ExprKind::Literal(Value::String(pair.as_str().to_string())),
+            span,
+        )),
+        Rule::expr => build_expr(pair),
+        _ => build_atom(pair),
+    }
 }
 
 // -- Expression parser (handles operators) -------------------------------
@@ -817,9 +839,10 @@ mod tests {
         let template = parse(r#"<trigger id="dark_forest">"#).unwrap();
         assert_eq!(template.nodes.len(), 1);
         match &template.nodes[0].node {
-            NodeKind::Expression(ExprKind::Trigger(t)) => {
-                assert_eq!(t.entry_id, "dark_forest");
-            }
+            NodeKind::Expression(ExprKind::Trigger(t)) => match &t.entry_id.node {
+                ExprKind::Literal(Value::String(s)) => assert_eq!(s, "dark_forest"),
+                other => panic!("expected string literal id, got {other:?}"),
+            },
             _ => panic!("expected trigger"),
         }
     }
@@ -829,9 +852,10 @@ mod tests {
         let template = parse("[[LORE_INTRO]]").unwrap();
         assert_eq!(template.nodes.len(), 1);
         match &template.nodes[0].node {
-            NodeKind::Expression(ExprKind::Document(d)) => {
-                assert_eq!(d.document_id, "LORE_INTRO");
-            }
+            NodeKind::Expression(ExprKind::Document(d)) => match &d.document_id.node {
+                ExprKind::Literal(Value::String(s)) => assert_eq!(s, "LORE_INTRO"),
+                other => panic!("expected string literal id, got {other:?}"),
+            },
             _ => panic!("expected document ref"),
         }
     }

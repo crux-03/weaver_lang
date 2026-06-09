@@ -1,8 +1,9 @@
 use std::any::Any;
+use std::collections::HashMap;
 
+use crate::Registry;
 use crate::ast::value::Value;
 use crate::error::EvalError;
-use crate::Registry;
 
 /// Trait implemented by the host application to provide state and side effects
 /// to the weaver-lang evaluator.
@@ -45,7 +46,11 @@ pub trait EvalContext: Any {
     /// can return either pre-evaluated content or a raw template string
     /// (which the evaluator will not parse further — the host should
     /// evaluate it before returning if needed).
-    fn resolve_document(&mut self, document_id: &str, registry: &Registry) -> Result<String, EvalError>;
+    fn resolve_document(
+        &mut self,
+        document_id: &str,
+        registry: &Registry,
+    ) -> Result<String, EvalError>;
 }
 
 /// A minimal [`EvalContext`] implementation for testing and single-file use.
@@ -61,13 +66,17 @@ pub trait EvalContext: Any {
 /// ctx.set("local", "name", "Alice");
 /// ```
 pub struct SimpleContext {
-    variables: std::collections::HashMap<String, std::collections::HashMap<String, Value>>,
+    variables: HashMap<String, HashMap<String, Value>>,
+    triggers: HashMap<String, String>,
+    documents: HashMap<String, String>,
 }
 
 impl SimpleContext {
     pub fn new() -> Self {
         Self {
-            variables: std::collections::HashMap::new(),
+            variables: HashMap::new(),
+            triggers: HashMap::new(),
+            documents: HashMap::new(),
         }
     }
 
@@ -78,6 +87,18 @@ impl SimpleContext {
             .entry(scope.to_string())
             .or_default()
             .insert(name.to_string(), value.into());
+    }
+
+    // Harness-only helpers so dynamic trigger/document resolution can be
+    // verified end-to-end.
+    pub fn set_trigger(&mut self, entry_id: &str, content: &str) {
+        self.triggers
+            .insert(entry_id.to_string(), content.to_string());
+    }
+
+    pub fn set_document(&mut self, document_id: &str, content: &str) {
+        self.documents
+            .insert(document_id.to_string(), content.to_string());
     }
 }
 
@@ -105,16 +126,20 @@ impl EvalContext for SimpleContext {
     }
 
     fn fire_trigger(&mut self, entry_id: &str, _registry: &Registry) -> Result<String, EvalError> {
-        Err(EvalError::new(
-            crate::error::EvalErrorKind::TriggerNotFound,
-            format!("SimpleContext does not support triggers (tried: {entry_id})"),
-        ))
+        self.triggers
+            .get(entry_id)
+            .cloned()
+            .ok_or_else(|| EvalError::host_error(format!("unknown trigger entry: {entry_id}")))
     }
 
-    fn resolve_document(&mut self, document_id: &str, _registry: &Registry) -> Result<String, EvalError> {
-        Err(EvalError::new(
-            crate::error::EvalErrorKind::DocumentNotFound,
-            format!("SimpleContext does not support documents (tried: {document_id})"),
-        ))
+    fn resolve_document(
+        &mut self,
+        document_id: &str,
+        _registry: &Registry,
+    ) -> Result<String, EvalError> {
+        self.documents
+            .get(document_id)
+            .cloned()
+            .ok_or_else(|| EvalError::host_error(format!("unknown document: {document_id}")))
     }
 }

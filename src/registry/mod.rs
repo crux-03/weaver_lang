@@ -274,11 +274,7 @@ impl<F> ClosureProcessor<F>
 where
     F: Fn(HashMap<String, Value>) -> Result<Value, EvalError> + Send + Sync,
 {
-    pub fn new(
-        namespace: impl Into<String>,
-        name: impl Into<String>,
-        func: F,
-    ) -> Self {
+    pub fn new(namespace: impl Into<String>, name: impl Into<String>, func: F) -> Self {
         Self {
             sig: ProcessorSignature {
                 namespace: namespace.into(),

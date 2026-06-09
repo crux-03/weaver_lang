@@ -47,7 +47,10 @@ impl ParseError {
         let pointer = " ".repeat(col.saturating_sub(1))
             + &"^".repeat((self.span.end - self.span.start).max(1));
 
-        let mut output = format!("Error: {}\n{location}\n  |\n{line:>3} | {source_line}\n    | {pointer}", self.message);
+        let mut output = format!(
+            "Error: {}\n{location}\n  |\n{line:>3} | {source_line}\n    | {pointer}",
+            self.message
+        );
 
         if let Some(hint) = &self.hint {
             output.push_str(&format!("\n  = hint: {hint}"));

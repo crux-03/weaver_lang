@@ -100,6 +100,8 @@ Evaluates to `Line before\nLine after`.
 ```
 <trigger id="dark_forest">     // Activate another entry, splice its output
 [[LORE_INTRO]]                 // Import a reusable content block
+
+<trigger id=({{user:name}} + "_inventory")>     // Complex expressions are also supported!
 ```
 
 Both are expressions — they can appear in arrays, processor arguments, conditions, etc.
