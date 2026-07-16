@@ -799,7 +799,10 @@ mod tests {
             NodeKind::Expression(ExprKind::Variable(v)) => {
                 assert_eq!(v.scope, Some("char".to_string()));
                 assert_eq!(v.name, "alice.inventory");
-                assert_eq!(v.path_segments().collect::<Vec<_>>(), ["alice", "inventory"]);
+                assert_eq!(
+                    v.path_segments().collect::<Vec<_>>(),
+                    ["alice", "inventory"]
+                );
             }
             _ => panic!("expected variable"),
         }
