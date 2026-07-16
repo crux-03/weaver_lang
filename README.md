@@ -51,7 +51,7 @@ assert_eq!(template.evaluate(&mut ctx, &registry).unwrap(), "HP: 42");
 ### Overview
 | type       | syntax                                                |
 |------------|-------------------------------------------------------|
-| variables  | `{{namespace:value}}`                                 |
+| variables  | `{{namespace:value}}` or `{{namespace:a.b.c}}`        |
 | processors | `@[namespace.name(foo: value1, bar: value2)]`         |
 | commands   | `$[name(foo, bar)]`                                   |
 | triggers   | `<trigger id="some_id">`                              |
@@ -63,9 +63,12 @@ assert_eq!(template.evaluate(&mut ctx, &registry).unwrap(), "HP: 42");
 
 ```
 {{scope:name}}
+{{char:alice.inventory}}
 ```
 
 Look up a variable by scope and name. `global` and `local` are conventional, but hosts can define any scope.
+
+The name may be a **dotted path** (`{{char:alice.inventory}}`). The path is opaque to the language — it reaches the host's `resolve_variable` as the single string `"alice.inventory"`, and the host decides how to interpret the segments (e.g. entity `alice`, field `inventory`). Bare loop bindings (`{{item}}`) stay single-segment.
 
 ### Processors — `@[namespace.name(key: value)]`
 

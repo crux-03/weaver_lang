@@ -44,7 +44,23 @@ pub struct VariableRef {
     /// `None` for bare loop variables (`{{item}}`), `Some` for scoped
     /// variables (`{{global:name}}`).
     pub scope: Option<String>,
+    /// The variable name. For scoped variables this may be a dotted path
+    /// (`{{char:alice.inventory}}` yields `name == "alice.inventory"`). The
+    /// path is opaque to the evaluator and passed to the host verbatim;
+    /// use [`VariableRef::path_segments`] to split it. Bare loop bindings
+    /// are always single-segment.
     pub name: String,
+}
+
+impl VariableRef {
+    /// Split [`name`](Self::name) into its dotted path segments.
+    ///
+    /// `"alice.inventory"` yields `["alice", "inventory"]`; a plain name
+    /// yields a single-element slice. Useful for hosts that store nested
+    /// state and want to walk the path themselves.
+    pub fn path_segments(&self) -> impl Iterator<Item = &str> {
+        self.name.split('.')
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -40,9 +40,15 @@ expression_node = _{
 command_node = { command_call }
 
 // ── Variables: {{scope:name}} or {{name}} (bare loop binding) ───────────
+//
+// The name in a scoped variable may be a dotted path
+// (`{{char:alice.inventory}}`). The path is opaque to the language: it is
+// handed to the host's `resolve_variable` as a single dotted string, and
+// the host decides how to interpret the segments. Bare loop bindings stay
+// single-segment.
 
 variable   = { "{{" ~ ws ~ (scoped_var | bare_var) ~ ws ~ "}}" }
-scoped_var = { identifier ~ ":" ~ identifier }
+scoped_var = { identifier ~ ":" ~ dotted_name }
 bare_var   = { identifier }
 
 // ── Processors: @[namespace.name(key: value, key2: value2)] ─────────────

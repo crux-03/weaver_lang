@@ -791,6 +791,39 @@ mod tests {
     }
 
     #[test]
+    fn test_dotted_scoped_variable() {
+        let template = parse("{{char:alice.inventory}}").unwrap();
+        assert_eq!(template.nodes.len(), 1);
+        match &template.nodes[0].node {
+            NodeKind::Expression(ExprKind::Variable(v)) => {
+                assert_eq!(v.scope, Some("char".to_string()));
+                assert_eq!(v.name, "alice.inventory");
+                assert_eq!(v.path_segments().collect::<Vec<_>>(), ["alice", "inventory"]);
+            }
+            _ => panic!("expected variable"),
+        }
+    }
+
+    #[test]
+    fn test_deep_dotted_scoped_variable() {
+        let template = parse("{{world:region.north.weather}}").unwrap();
+        match &template.nodes[0].node {
+            NodeKind::Expression(ExprKind::Variable(v)) => {
+                assert_eq!(v.scope, Some("world".to_string()));
+                assert_eq!(v.name, "region.north.weather");
+            }
+            _ => panic!("expected variable"),
+        }
+    }
+
+    #[test]
+    fn test_bare_variable_rejects_dots() {
+        // Bare loop bindings stay single-segment; a dotted bare var is a
+        // parse error, not a silently-accepted path.
+        assert!(parse("{{item.field}}").is_err());
+    }
+
+    #[test]
     fn test_mixed_template() {
         let template = parse("Hello, {{local:name}}! You have {{global:count}} items.").unwrap();
         // "Hello, " + var + "! You have " + var + " items."

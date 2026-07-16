@@ -966,6 +966,28 @@ mod tests {
     }
 
     #[test]
+    fn test_dotted_path_reaches_host_verbatim() {
+        // Option A: the dotted path is opaque to the language and handed to
+        // the host as a single name. SimpleContext keys on it directly.
+        let mut ctx = SimpleContext::new();
+        ctx.set("char", "alice.inventory", "sword, shield");
+        assert_eq!(
+            eval_with_ctx("{{char:alice.inventory}}", &mut ctx),
+            "sword, shield"
+        );
+    }
+
+    #[test]
+    fn test_dotted_path_lenient_reconstruction() {
+        let template = parser::parse("{{char:alice.inventory}}").unwrap();
+        let mut ctx = SimpleContext::new();
+        let registry = Registry::new();
+        let opts = EvalOptions::new().lenient(true);
+        let out = evaluate_with_options(&template, &mut ctx, &registry, opts).unwrap();
+        assert_eq!(out, "{{char:alice.inventory}}");
+    }
+
+    #[test]
     fn test_if_true() {
         let mut ctx = SimpleContext::new();
         ctx.set("global", "show", Value::Bool(true));
