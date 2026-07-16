@@ -116,6 +116,7 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    Mod,
 }
 
 impl BinOp {
@@ -126,7 +127,7 @@ impl BinOp {
             BinOp::Eq | BinOp::NotEq => 3,
             BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => 4,
             BinOp::Add | BinOp::Sub => 5,
-            BinOp::Mul | BinOp::Div => 6,
+            BinOp::Mul | BinOp::Div | BinOp::Mod => 6,
         }
     }
 }

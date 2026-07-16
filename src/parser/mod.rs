@@ -531,6 +531,7 @@ fn parse_bin_op(s: &str) -> BinOp {
         "-" => BinOp::Sub,
         "*" => BinOp::Mul,
         "/" => BinOp::Div,
+        "%" => BinOp::Mod,
         _ => unreachable!("unknown operator: {s}"),
     }
 }

@@ -841,7 +841,6 @@ fn eval_binary_op(
     match op {
         BinOp::Eq => Ok(Value::Bool(values_equal(left, right))),
         BinOp::NotEq => Ok(Value::Bool(!values_equal(left, right))),
-
         BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
             let l = require_number(left, span)?;
             let r = require_number(right, span)?;
@@ -854,12 +853,10 @@ fn eval_binary_op(
             };
             Ok(Value::Bool(result))
         }
-
         BinOp::And => Ok(Value::Bool(left.is_truthy() && right.is_truthy())),
         BinOp::Or => Ok(Value::Bool(left.is_truthy() || right.is_truthy())),
-
         BinOp::Add => eval_add(left, right, span),
-        BinOp::Sub | BinOp::Mul | BinOp::Div => {
+        BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let l = require_number(left, span)?;
             let r = require_number(right, span)?;
             let result = match op {
@@ -874,6 +871,16 @@ fn eval_binary_op(
                         .with_span(span));
                     }
                     l / r
+                }
+                BinOp::Mod => {
+                    if r == 0.0 {
+                        return Err(EvalError::new(
+                            EvalErrorKind::ArithmeticError,
+                            "modulo by zero",
+                        )
+                        .with_span(span));
+                    }
+                    l % r
                 }
                 _ => unreachable!(),
             };
@@ -1700,6 +1707,16 @@ mod expr_eval_tests {
     #[test]
     fn test_expr_parenthesized() {
         assert_eq!(eval_expr("(1 + 2) * 3"), Value::Number(9.0));
+    }
+
+    #[test]
+    fn test_expr_modulo() {
+        assert_eq!(eval_expr("5 % 2"), Value::Number(1.0));
+    }
+
+    #[test]
+    fn test_expr_modulo_mul_chain() {
+        assert_eq!(eval_expr("(11 % 3) * 2"), Value::Number(4.0));
     }
 
     #[test]

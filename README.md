@@ -139,7 +139,7 @@ Expressions appear in conditions, arguments, and inline. Types are preserved int
 
 **Comparison:** `==`, `!=`, `<`, `>`, `<=`, `>=`
 **Logical:** `&&`, `||`, `!`
-**Arithmetic:** `+`, `-`, `*`, `/`
+**Arithmetic:** `+`, `-`, `*`, `/`, `%`
 
 `+` concatenates when either operand is a string. Division by zero returns an error.
 
