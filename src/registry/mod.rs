@@ -11,6 +11,23 @@
 //!   directly for more control over signatures and validation. The
 //!   `#[weaver_processor]` macro in the `weaver-macros` crate can generate
 //!   processor implementations from a function signature.
+//!
+//! # Signatures describe callables to tooling
+//!
+//! Every callable declares a [`CommandSignature`] or [`ProcessorSignature`]:
+//! a description, a return type, and its parameters with their types and
+//! optionality. This is the only view an editor has of what a plugin
+//! provides, so the fields are required rather than optional — a callable
+//! that cannot describe itself cannot be registered.
+//!
+//! Hosts read this back with [`Registry::command_signatures`] and
+//! [`Registry::processor_signatures`]. Enable the `serde` feature to ship
+//! the result to a frontend.
+//!
+//! Prefer the macros over hand-written signatures. A hand-written signature
+//! is an independent claim about code that may not match it; a generated one
+//! is derived from the same function the extraction code is, so `required`
+//! and `expected_type` cannot drift from what the body actually accepts.
 
 use crate::ast::value::Value;
 use crate::error::EvalError;
@@ -55,44 +72,79 @@ pub trait WeaverProcessor: Send + Sync {
 
 // ── Signatures ──────────────────────────────────────────────────────────
 
-/// Describes a command's name and expected parameters.
+/// Describes a command: its identity, what it does, and what it expects.
+///
+/// Every field is public and required. Signatures are the only description
+/// of a callable that tooling — editor autocompletion, plugin browsers,
+/// generated docs — can see, so a callable that cannot describe itself
+/// cannot be registered.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CommandSignature {
     pub name: String,
+    /// One line, imperative, no trailing period: "Set a variable in a
+    /// writable scope."
+    pub description: String,
+    /// The type this command evaluates to in template position.
+    /// [`ValueType::None`] for commands that exist only for their effect.
+    pub returns: ValueType,
     pub params: Vec<ParamDef>,
+    /// Whether the command takes `&mut dyn EvalContext` — that is, whether
+    /// calling it can change evaluation state. Derived by the
+    /// `#[weaver_command]` macro from the presence of a `ctx` parameter.
+    pub mutates_context: bool,
 }
 
-/// Describes a processor's namespace, name, and expected properties.
+/// Describes a processor: its identity, what it does, and what it expects.
+///
+/// See [`CommandSignature`] on why every field is required.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProcessorSignature {
     pub namespace: String,
     pub name: String,
+    /// One line, imperative, no trailing period: "Uppercase a string."
+    pub description: String,
+    /// The type this processor evaluates to. Processors always produce a
+    /// value, so this is rarely [`ValueType::None`].
+    pub returns: ValueType,
     pub properties: Vec<PropertyDef>,
 }
 
 /// A positional parameter definition for a command signature.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ParamDef {
     pub name: String,
+    /// May be empty — a parameter whose name and type say enough.
+    pub description: String,
     pub expected_type: Option<ValueType>,
     pub required: bool,
 }
 
 /// A named property definition for a processor signature.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PropertyDef {
     pub key: String,
+    /// May be empty — a property whose key and type say enough.
+    pub description: String,
     pub expected_type: Option<ValueType>,
     pub required: bool,
 }
 
 /// Type tag used in signatures for runtime validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ValueType {
     String,
     Number,
     Bool,
     Array,
+    /// The absence of a value. Mirrors [`Value::None`] — used as a return
+    /// type for commands that produce no output in template position.
+    None,
     /// Accepts any value type.
     Any,
 }
@@ -106,6 +158,7 @@ impl ValueType {
             ValueType::Number => matches!(value, Value::Number(_)),
             ValueType::Bool => matches!(value, Value::Bool(_)),
             ValueType::Array => matches!(value, Value::Array(_)),
+            ValueType::None => matches!(value, Value::None),
         }
     }
 }
@@ -154,6 +207,31 @@ impl Registry {
         let sig = proc.signature();
         let key = format!("{}.{}", sig.namespace, sig.name);
         self.processors.insert(key, Box::new(proc));
+    }
+
+    /// Every registered command's signature, in unspecified order.
+    ///
+    /// Intended for tooling: an editor lists these to offer completions and
+    /// hovers. Sort by [`CommandSignature::name`] if you need stable output.
+    pub fn command_signatures(&self) -> Vec<CommandSignature> {
+        self.commands.values().map(|c| c.signature()).collect()
+    }
+
+    /// Every registered processor's signature, in unspecified order.
+    pub fn processor_signatures(&self) -> Vec<ProcessorSignature> {
+        self.processors.values().map(|p| p.signature()).collect()
+    }
+
+    /// One command's signature, or `None` if it is not registered.
+    pub fn command_signature(&self, name: &str) -> Option<CommandSignature> {
+        self.commands.get(name).map(|c| c.signature())
+    }
+
+    /// One processor's signature, or `None` if it is not registered.
+    pub fn processor_signature(&self, namespace: &str, name: &str) -> Option<ProcessorSignature> {
+        self.processors
+            .get(&format!("{namespace}.{name}"))
+            .map(|p| p.signature())
     }
 
     /// Dispatch a command call. Returns [`EvalError`] if the command
@@ -221,14 +299,50 @@ impl<F> ClosureCommand<F>
 where
     F: Fn(Vec<Value>) -> Result<Option<Value>, EvalError> + Send + Sync,
 {
+    /// Create a closure command. The signature starts undescribed and
+    /// untyped — `returns` is [`ValueType::Any`] and there are no declared
+    /// params. Use [`describe`](Self::describe), [`returns`](Self::returns)
+    /// and [`param`](Self::param) to fill it in; anything left blank shows
+    /// up blank in editors.
     pub fn new(name: impl Into<String>, func: F) -> Self {
         Self {
             sig: CommandSignature {
                 name: name.into(),
+                description: String::new(),
+                returns: ValueType::Any,
                 params: Vec::new(),
+                mutates_context: false,
             },
             func,
         }
+    }
+
+    /// Set the one-line description shown in editor hovers.
+    pub fn describe(mut self, description: impl Into<String>) -> Self {
+        self.sig.description = description.into();
+        self
+    }
+
+    /// Declare what this command evaluates to in template position.
+    pub fn returns(mut self, returns: ValueType) -> Self {
+        self.sig.returns = returns;
+        self
+    }
+
+    /// Append a positional parameter. Order of calls is argument order.
+    pub fn param(
+        mut self,
+        name: impl Into<String>,
+        expected_type: ValueType,
+        required: bool,
+    ) -> Self {
+        self.sig.params.push(ParamDef {
+            name: name.into(),
+            description: String::new(),
+            expected_type: Some(expected_type),
+            required,
+        });
+        self
     }
 }
 
@@ -274,15 +388,49 @@ impl<F> ClosureProcessor<F>
 where
     F: Fn(HashMap<String, Value>) -> Result<Value, EvalError> + Send + Sync,
 {
+    /// Create a closure processor. As with [`ClosureCommand::new`], the
+    /// signature starts undescribed — fill it in with
+    /// [`describe`](Self::describe), [`returns`](Self::returns) and
+    /// [`property`](Self::property).
     pub fn new(namespace: impl Into<String>, name: impl Into<String>, func: F) -> Self {
         Self {
             sig: ProcessorSignature {
                 namespace: namespace.into(),
                 name: name.into(),
+                description: String::new(),
+                returns: ValueType::Any,
                 properties: Vec::new(),
             },
             func,
         }
+    }
+
+    /// Set the one-line description shown in editor hovers.
+    pub fn describe(mut self, description: impl Into<String>) -> Self {
+        self.sig.description = description.into();
+        self
+    }
+
+    /// Declare what this processor evaluates to.
+    pub fn returns(mut self, returns: ValueType) -> Self {
+        self.sig.returns = returns;
+        self
+    }
+
+    /// Declare a named property this processor reads.
+    pub fn property(
+        mut self,
+        key: impl Into<String>,
+        expected_type: ValueType,
+        required: bool,
+    ) -> Self {
+        self.sig.properties.push(PropertyDef {
+            key: key.into(),
+            description: String::new(),
+            expected_type: Some(expected_type),
+            required,
+        });
+        self
     }
 }
 

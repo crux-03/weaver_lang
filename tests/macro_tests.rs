@@ -6,7 +6,7 @@ use weaver_lang::{
 
 // ── Basic processor: picks first item from an array ─────────────────────
 
-#[weaver_processor(namespace = "test", name = "first")]
+#[weaver_processor(namespace = "test", name = "first", returns = "any")]
 fn first_item(items: Vec<Value>) -> Result<Value, EvalError> {
     items
         .into_iter()
@@ -16,28 +16,28 @@ fn first_item(items: Vec<Value>) -> Result<Value, EvalError> {
 
 // ── String processor: wraps text in brackets ────────────────────────────
 
-#[weaver_processor(namespace = "test", name = "bracket")]
+#[weaver_processor(namespace = "test", name = "bracket", returns = "string")]
 fn bracket(text: String) -> Result<Value, EvalError> {
     Ok(Value::String(format!("[{text}]")))
 }
 
 // ── Numeric processor: doubles a number ─────────────────────────────────
 
-#[weaver_processor(namespace = "test", name = "double")]
+#[weaver_processor(namespace = "test", name = "double", returns = "number")]
 fn double_number(n: f64) -> Result<Value, EvalError> {
     Ok(Value::Number(n * 2.0))
 }
 
 // ── Bool processor: returns "yes" or "no" ───────────────────────────────
 
-#[weaver_processor(namespace = "test", name = "yesno")]
+#[weaver_processor(namespace = "test", name = "yesno", returns = "string")]
 fn yes_no(value: bool) -> Result<Value, EvalError> {
     Ok(Value::String(if value { "yes" } else { "no" }.to_string()))
 }
 
 // ── Multi-param processor ───────────────────────────────────────────────
 
-#[weaver_processor(namespace = "test", name = "repeat")]
+#[weaver_processor(namespace = "test", name = "repeat", returns = "string")]
 fn repeat_text(text: String, count: f64) -> Result<Value, EvalError> {
     Ok(Value::String(text.repeat(count.round() as usize)))
 }
@@ -153,21 +153,21 @@ fn test_macro_processor_in_template_context() {
 
 // ── Pure command: no ctx or registry access ──────────────────────────
 
-#[weaver_command(name = "greet")]
+#[weaver_command(name = "greet", returns = "string")]
 fn greet(name: String) -> Result<Option<Value>, EvalError> {
     Ok(Some(Value::String(format!("Hello, {name}!"))))
 }
 
 // ── Command returning None (side-effect only, no ctx needed here) ───
 
-#[weaver_command(name = "noop")]
+#[weaver_command(name = "noop", returns = "none")]
 fn noop() -> Result<Option<Value>, EvalError> {
     Ok(None)
 }
 
 // ── Command with ctx access: sets a variable ────────────────────────
 
-#[weaver_command(name = "set_var")]
+#[weaver_command(name = "set_var", returns = "none")]
 fn set_var(
     key: String,
     value: Value,
@@ -181,7 +181,7 @@ fn set_var(
 
 // ── Command with ctx access: reads and returns a variable ───────────
 
-#[weaver_command(name = "get_var")]
+#[weaver_command(name = "get_var", returns = "any")]
 fn get_var(key: String, ctx: &mut dyn EvalContext) -> Result<Option<Value>, EvalError> {
     if let Some(pos) = key.find(':') {
         let scope = &key[..pos];
@@ -197,14 +197,14 @@ fn get_var(key: String, ctx: &mut dyn EvalContext) -> Result<Option<Value>, Eval
 
 // ── Command with numeric arg ────────────────────────────────────────
 
-#[weaver_command(name = "double")]
+#[weaver_command(name = "double", returns = "number")]
 fn cmd_double(n: f64) -> Result<Option<Value>, EvalError> {
     Ok(Some(Value::Number(n * 2.0)))
 }
 
 // ── Command with bool arg ───────────────────────────────────────────
 
-#[weaver_command(name = "yesno")]
+#[weaver_command(name = "yesno", returns = "string")]
 fn cmd_yesno(flag: bool) -> Result<Option<Value>, EvalError> {
     Ok(Some(Value::String(
         if flag { "yes" } else { "no" }.to_string(),
@@ -213,7 +213,7 @@ fn cmd_yesno(flag: bool) -> Result<Option<Value>, EvalError> {
 
 // ── Command with array arg ──────────────────────────────────────────
 
-#[weaver_command(name = "first")]
+#[weaver_command(name = "first", returns = "any")]
 fn cmd_first(items: Vec<Value>) -> Result<Option<Value>, EvalError> {
     Ok(items.into_iter().next())
 }

@@ -1316,7 +1316,10 @@ mod whitespace_normalization_tests {
             fn signature(&self) -> crate::registry::CommandSignature {
                 crate::registry::CommandSignature {
                     name: "set_var".to_string(),
+                    description: "Set a variable.".to_string(),
+                    returns: crate::registry::ValueType::None,
                     params: Vec::new(),
+                    mutates_context: true,
                 }
             }
         }
