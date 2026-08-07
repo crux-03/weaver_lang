@@ -74,7 +74,7 @@ pub mod registry;
 
 pub use ast::span::{Span, Spanned};
 pub use ast::template::Template;
-pub use ast::value::Value;
+pub use ast::value::{PathError, Value};
 pub use error::{EvalError, EvalErrorKind, ParseError};
 pub use eval::{
     EvalContext, EvalOptions, SimpleContext, eval_expr_value, evaluate, evaluate_with_options,

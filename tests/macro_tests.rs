@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use macros::{weaver_command, weaver_processor};
 #[allow(unused_imports)]
 use weaver_lang::{
@@ -42,6 +44,16 @@ fn repeat_text(text: String, count: f64) -> Result<Value, EvalError> {
     Ok(Value::String(text.repeat(count.round() as usize)))
 }
 
+// ── Object processor: counts keys ───────────────────────────────────────
+//
+// There is no object literal, so a host processor is one of the few ways
+// to take an object as input — the macro has to know the type.
+
+#[weaver_processor(namespace = "test", name = "key_count", returns = "number")]
+fn key_count(map: BTreeMap<String, Value>) -> Result<Value, EvalError> {
+    Ok(Value::Number(map.len() as f64))
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 fn make_registry() -> Registry {
@@ -51,6 +63,7 @@ fn make_registry() -> Registry {
     registry.register_processor(DoubleNumberProcessor);
     registry.register_processor(YesNoProcessor);
     registry.register_processor(RepeatTextProcessor);
+    registry.register_processor(KeyCountProcessor);
     registry
 }
 
@@ -345,4 +358,37 @@ fn test_cmd_macro_in_template_with_processor() {
     let mut ctx = SimpleContext::new();
     let result = evaluate(&template, &mut ctx, &registry).unwrap();
     assert_eq!(result, "[hi] 10");
+}
+
+#[test]
+fn test_macro_object_processor() {
+    // The object has to come from the host: `{{char:alice}}` resolves to a
+    // whole object, which the processor then receives as a BTreeMap.
+    let template = weaver_lang::parse("@[test.key_count(map: {{char:alice}})]").unwrap();
+    let mut ctx = SimpleContext::new();
+    ctx.set(
+        "char",
+        "alice",
+        Value::object([("hp", 10i64), ("mp", 3i64), ("xp", 0i64)]),
+    );
+    let registry = make_registry();
+    assert_eq!(evaluate(&template, &mut ctx, &registry).unwrap(), "3");
+}
+
+#[test]
+fn test_macro_object_processor_rejects_a_non_object() {
+    let template = weaver_lang::parse("@[test.key_count(map: 5)]").unwrap();
+    let mut ctx = SimpleContext::new();
+    let registry = make_registry();
+    let err = evaluate(&template, &mut ctx, &registry).unwrap_err();
+    assert_eq!(err.kind, EvalErrorKind::TypeError);
+    assert!(err.message.contains("object"), "{}", err.message);
+}
+
+#[test]
+fn test_macro_object_signature_reports_object_types() {
+    use weaver_lang::registry::{ValueType, WeaverProcessor};
+    let sig = KeyCountProcessor.signature();
+    assert_eq!(sig.returns, ValueType::Number);
+    assert_eq!(sig.properties[0].expected_type, Some(ValueType::Object));
 }

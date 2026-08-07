@@ -51,7 +51,7 @@ assert_eq!(template.evaluate(&mut ctx, &registry).unwrap(), "HP: 42");
 ### Overview
 | type       | syntax                                                |
 |------------|-------------------------------------------------------|
-| variables  | `{{namespace:value}}` or `{{namespace:a.b.c}}`        |
+| variables  | `{{scope:name}}`, `{{scope:name.path.into.object}}`    |
 | processors | `@[namespace.name(foo: value1, bar: value2)]`         |
 | commands   | `$[name(foo, bar)]`                                   |
 | triggers   | `<trigger id="some_id">`                              |
@@ -63,12 +63,49 @@ assert_eq!(template.evaluate(&mut ctx, &registry).unwrap(), "HP: 42");
 
 ```
 {{scope:name}}
-{{char:alice.inventory}}
+{{char:alice.stats.hp}}
+{{npc.name}}
 ```
 
 Look up a variable by scope and name. `global` and `local` are conventional, but hosts can define any scope.
 
-The name may be a **dotted path** (`{{char:alice.inventory}}`). The path is opaque to the language — it reaches the host's `resolve_variable` as the single string `"alice.inventory"`, and the host decides how to interpret the segments (e.g. entity `alice`, field `inventory`). Bare loop bindings (`{{item}}`) stay single-segment.
+A reference may carry a **dotted path**. The first segment is the variable name — the part the host resolves — and every segment after it indexes into the resolved value:
+
+```
+{{char:alice.stats.hp}}
+   │     │     └── path: indexed by the language
+   │     └──────── name: resolved by the host
+   └────────────── scope
+```
+
+Every non-leaf segment must be an object; see [Objects](#objects). Paths work on bare loop bindings too (`{{npc.name}}`), which is what makes `foreach` over an array of objects useful.
+
+A path that runs off the end of an object — `{{char:alice.stats.luck}}` where `luck` is absent — is reported exactly like a variable that does not exist: an `UndefinedVariable` error naming the full path, or, in lenient mode, the reference passed through unevaluated. Indexing something that *isn't* an object (`{{char:alice.stats.hp.max}}`) is a `TypeError` instead, because it can never be satisfied.
+
+### Objects
+
+`Value::Object` is a string-keyed map, supplied by the host. The language can read into it but has no syntax for building one — there is no object literal.
+
+Objects are deliberately minimal:
+
+- **Truthiness** — a non-empty object is truthy, an empty one is falsy, matching arrays and strings.
+- **Rendering** — an object in template position renders as **compact JSON** with keys in sorted order, so output is deterministic across runs. Hosts wanting pretty-printed output can register a processor that formats the value themselves.
+- **Iteration** — objects are not iterable. `foreach` still requires an array.
+- **Equality** — like arrays, objects do not compare equal with `==`.
+
+Note one asymmetry: a top-level array joins its elements (`{{tags}}` → `a, b`), but an array reached *inside* an object renders as JSON (`{{char:alice}}` → `{"tags":["a","b"]}`). The join predates objects and existing templates depend on it.
+
+```rust
+use weaver_lang::Value;
+
+let alice = Value::object([
+    ("name", Value::String("Alice".into())),
+    ("stats", Value::object([("hp", 10i64)])),
+]);
+assert_eq!(alice.to_json(), r#"{"name":"Alice","stats":{"hp":10}}"#);
+```
+
+**Writing** is the host's business — the language has no assignment syntax, so a `set_var`-style command belongs to your host. `Value::set_path` is provided so that command folds paths into objects the same way reads unfold them (creating intermediate objects as needed, refusing to overwrite a non-object).
 
 ### Processors — `@[namespace.name(key: value)]`
 
@@ -244,7 +281,8 @@ struct GameContext { /* your state */ }
 
 impl EvalContext for GameContext {
     fn resolve_variable(&self, scope: &str, name: &str) -> Result<Option<Value>, EvalError> {
-        // Look up variables from your storage.
+        // Look up variables from your storage. `name` is always a single
+        // segment — dotted paths are indexed into the value you return.
         // Return Ok(None) for undefined variables.
         todo!()
     }
@@ -268,6 +306,23 @@ impl EvalContext for GameContext {
 ```
 
 The evaluator manages temporary scopes internally (foreach bindings). Only named scope operations like `"global"` and `"local"` reach the host.
+
+### Pushing paths down into storage
+
+`resolve_variable_path` has a default implementation that resolves the root through `resolve_variable` and walks the path with `Value::get_path`. That is correct for every host, but it has to materialize the whole root value — an entire character sheet, say — to read one field. Override it when your storage can index the path directly:
+
+```rust
+fn resolve_variable_path(
+    &self,
+    scope: &str,
+    name: &str,
+    path: &[String],
+) -> Result<Option<Value>, EvalError> {
+    // Ok(None)  — root or some segment is absent (treated as undefined).
+    // Err(TypeError) — a non-leaf segment existed but was not an object.
+    todo!()
+}
+```
 
 ## Evaluation options
 
@@ -326,6 +381,7 @@ let err = EvalError::host_error("failed to load entry").with_source(io_err);
 - All numbers are `f64`. Large integers above 2^53 lose precision.
 - No assignment syntax in the language. Variable mutation goes through commands which hosts need to define.
 - Document evaluation depends on the host's `resolve_document` implementation.
+- Object support is read-only and partial: no object literals, no iteration, no equality, and paths index objects only. Array indexing (`items[0]`) and slicing are not supported — path segments are identifiers, so a numeric segment does not parse.
 
 ## Dependencies
 

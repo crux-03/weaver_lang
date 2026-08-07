@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::Registry;
 use crate::ast::value::Value;
-use crate::error::EvalError;
+use crate::error::{EvalError, EvalErrorKind};
 
 /// Trait implemented by the host application to provide state and side effects
 /// to the weaver-lang evaluator.
@@ -26,9 +26,44 @@ use crate::error::EvalError;
 pub trait EvalContext: Any {
     /// Look up a variable by scope and name.
     ///
+    /// `name` is always a single segment — the dotted part of
+    /// `{{char:alice.stats.hp}}` is handled by
+    /// [`resolve_variable_path`](Self::resolve_variable_path), not here.
+    ///
     /// Return `Ok(None)` if the variable does not exist. The evaluator
     /// will produce an "undefined variable" error in that case.
     fn resolve_variable(&self, scope: &str, name: &str) -> Result<Option<Value>, EvalError>;
+
+    /// Look up a variable and index a dotted path into it.
+    ///
+    /// Called for every scoped variable reference; `path` is empty for a
+    /// plain `{{scope:name}}`. The default implementation resolves the root
+    /// through [`resolve_variable`](Self::resolve_variable) and walks the
+    /// path with [`Value::get_path`], which is correct for any host.
+    ///
+    /// Override it when resolving the root is expensive and the path could
+    /// be pushed down into storage — the default has to materialize the
+    /// whole root value (an entire character sheet, say) to read one field.
+    /// An override must keep the same contract:
+    ///
+    /// - `Ok(None)` — the root or some segment along the path is absent.
+    ///   The evaluator treats this exactly like an undefined variable.
+    /// - `Err(_)` with [`EvalErrorKind::TypeError`](crate::EvalErrorKind::TypeError)
+    ///   — a non-leaf segment existed but was not an object.
+    fn resolve_variable_path(
+        &self,
+        scope: &str,
+        name: &str,
+        path: &[String],
+    ) -> Result<Option<Value>, EvalError> {
+        let Some(root) = self.resolve_variable(scope, name)? else {
+            return Ok(None);
+        };
+        match root.get_path(path) {
+            Ok(found) => Ok(found.cloned()),
+            Err(err) => Err(EvalError::new(EvalErrorKind::TypeError, err.to_string())),
+        }
+    }
 
     /// Store a variable in the given scope.
     fn set_variable(&mut self, scope: &str, name: &str, value: Value) -> Result<(), EvalError>;

@@ -373,6 +373,7 @@ enum Kind {
     Number,
     Bool,
     Array,
+    Object,
 }
 
 impl Kind {
@@ -384,6 +385,7 @@ impl Kind {
             Kind::Number => (quote! { Number }, "number"),
             Kind::Bool => (quote! { Bool }, "bool"),
             Kind::Array => (quote! { Array }, "array"),
+            Kind::Object => (quote! { Object }, "object"),
             Kind::Any => (quote! { None }, "any"), // unused; Any never unwraps
         }
     }
@@ -395,6 +397,7 @@ impl Kind {
             Kind::Number => quote! { weaver_lang::registry::ValueType::Number },
             Kind::Bool => quote! { weaver_lang::registry::ValueType::Bool },
             Kind::Array => quote! { weaver_lang::registry::ValueType::Array },
+            Kind::Object => quote! { weaver_lang::registry::ValueType::Object },
         }
     }
 
@@ -405,6 +408,11 @@ impl Kind {
             Kind::Number => quote! { f64 },
             Kind::Bool => quote! { bool },
             Kind::Array => quote! { Vec<weaver_lang::Value> },
+            // Unqualified on purpose: `classify` only recognizes the bare
+            // `BTreeMap<String, Value>` spelling, so the caller necessarily
+            // has the type imported — and naming it here keeps that import
+            // used rather than tripping `unused_imports`.
+            Kind::Object => quote! { BTreeMap<String, weaver_lang::Value> },
         }
     }
 }
@@ -431,6 +439,7 @@ fn classify(ty: &Type) -> (Kind, bool) {
         "f64" => Kind::Number,
         "bool" => Kind::Bool,
         "Vec<Value>" => Kind::Array,
+        "BTreeMap<String,Value>" => Kind::Object,
         _ => Kind::Any,
     };
 
@@ -655,7 +664,8 @@ fn returns_token(
         syn::Error::new(
             call_site,
             "missing `returns` — declare what this callable evaluates to, e.g. \
-             `returns = \"string\"`. Valid: string, number, bool, array, none, any",
+             `returns = \"string\"`. Valid: string, number, bool, array, object, \
+             none, any",
         )
     })?;
 
@@ -664,6 +674,7 @@ fn returns_token(
         "number" => quote! { Number },
         "bool" => quote! { Bool },
         "array" => quote! { Array },
+        "object" => quote! { Object },
         "none" => quote! { None },
         "any" => quote! { Any },
         other => {
@@ -671,7 +682,7 @@ fn returns_token(
                 span,
                 format!(
                     "unknown return type `{other}`. Valid: string, number, bool, \
-                     array, none, any"
+                     array, object, none, any"
                 ),
             ));
         }

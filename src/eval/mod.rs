@@ -607,6 +607,11 @@ impl Evaluator {
     /// This means a foreach binding `item` is accessible as `{{item}}`
     /// (preferred) or `{{local:item}}` (backward-compatible). Bare syntax
     /// does NOT fall through to the host context.
+    ///
+    /// Only the root name participates in any of this; a trailing dotted
+    /// path is then indexed into whatever the root resolved to. A path that
+    /// runs off the end of an object is reported exactly like a variable
+    /// that does not exist — same error kind, same lenient passthrough.
     fn resolve_variable(
         &self,
         var: &VariableRef,
@@ -616,39 +621,77 @@ impl Evaluator {
         match &var.scope {
             // Bare variable — lexical scope only
             None => match self.resolve_lexical(&var.name) {
-                Some(val) => Ok(val),
-                None => {
-                    if self.options.lenient {
-                        Ok(Value::String(format!("{{{{{}}}}}", var.name)))
-                    } else {
-                        Err(EvalError::new(
-                            EvalErrorKind::UndefinedVariable,
-                            format!("undefined loop variable: {}", var.name),
-                        )
-                        .with_span(span))
-                    }
-                }
+                Some(root) => self.walk_path(&root, var, span),
+                None => self.missing_variable(var, span),
             },
             // Scoped variable — check lexical for "local", then host
             Some(scope) => {
                 if scope == "local"
-                    && let Some(val) = self.resolve_lexical(&var.name)
+                    && let Some(root) = self.resolve_lexical(&var.name)
                 {
-                    return Ok(val);
+                    return self.walk_path(&root, var, span);
                 }
 
-                match ctx.resolve_variable(scope, &var.name)? {
-                    Some(val) => Ok(val),
-                    None => {
-                        if self.options.lenient {
-                            Ok(Value::String(format!("{{{{{0}:{1}}}}}", scope, var.name)))
+                let resolved = ctx
+                    .resolve_variable_path(scope, &var.name, &var.path)
+                    .map_err(|e| {
+                        if e.span.is_none() {
+                            e.with_span(span)
                         } else {
-                            Err(EvalError::undefined_variable(scope, &var.name).with_span(span))
+                            e
                         }
-                    }
+                    })?;
+
+                match resolved {
+                    Some(val) => Ok(val),
+                    None => self.missing_variable(var, span),
                 }
             }
         }
+    }
+
+    /// Index a reference's dotted path into an already-resolved root.
+    ///
+    /// Used for lexical bindings, where the evaluator holds the value
+    /// itself. Host-resolved variables go through
+    /// [`EvalContext::resolve_variable_path`] instead, which lets the host
+    /// do the same walk its own way.
+    fn walk_path(
+        &self,
+        root: &Value,
+        var: &VariableRef,
+        span: crate::ast::span::Span,
+    ) -> Result<Value, EvalError> {
+        match root.get_path(&var.path) {
+            Ok(Some(val)) => Ok(val.clone()),
+            Ok(None) => self.missing_variable(var, span),
+            Err(err) => {
+                Err(EvalError::new(EvalErrorKind::TypeError, err.to_string()).with_span(span))
+            }
+        }
+    }
+
+    /// A reference that did not resolve — either the name is unknown or the
+    /// dotted path ran off the end of an object.
+    ///
+    /// Lenient mode passes the reference through in its source form so the
+    /// output stays re-parseable; strict mode errors.
+    fn missing_variable(
+        &self,
+        var: &VariableRef,
+        span: crate::ast::span::Span,
+    ) -> Result<Value, EvalError> {
+        if self.options.lenient {
+            return Ok(Value::String(var.to_source()));
+        }
+        let err = match &var.scope {
+            Some(scope) => EvalError::undefined_variable(scope, &var.full_name()),
+            None => EvalError::new(
+                EvalErrorKind::UndefinedVariable,
+                format!("undefined loop variable: {}", var.full_name()),
+            ),
+        };
+        Err(err.with_span(span))
     }
 
     // ── Control flow ────────────────────────────────────────────────────
@@ -972,15 +1015,131 @@ mod tests {
         );
     }
 
+    /// A character sheet: nested objects, an array, and a scalar leaf.
+    fn alice() -> Value {
+        Value::object([
+            ("name", Value::String("Alice".to_string())),
+            (
+                "stats",
+                Value::object([("hp", Value::Number(10.0)), ("mp", Value::Number(3.0))]),
+            ),
+            (
+                "inventory",
+                Value::Array(vec!["sword".into(), "shield".into()]),
+            ),
+        ])
+    }
+
     #[test]
-    fn test_dotted_path_reaches_host_verbatim() {
-        // Option A: the dotted path is opaque to the language and handed to
-        // the host as a single name. SimpleContext keys on it directly.
+    fn test_dotted_path_indexes_into_object() {
+        // The host is asked for the root only; the language walks the rest.
         let mut ctx = SimpleContext::new();
-        ctx.set("char", "alice.inventory", "sword, shield");
+        ctx.set("char", "alice", alice());
+        assert_eq!(eval_with_ctx("{{char:alice.name}}", &mut ctx), "Alice");
+        assert_eq!(eval_with_ctx("{{char:alice.stats.hp}}", &mut ctx), "10");
+    }
+
+    #[test]
+    fn test_path_to_array_keeps_join_rendering() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("char", "alice", alice());
         assert_eq!(
             eval_with_ctx("{{char:alice.inventory}}", &mut ctx),
             "sword, shield"
+        );
+    }
+
+    #[test]
+    fn test_object_renders_as_compact_json() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("char", "alice", alice());
+        assert_eq!(
+            eval_with_ctx("{{char:alice.stats}}", &mut ctx),
+            r#"{"hp":10,"mp":3}"#
+        );
+    }
+
+    #[test]
+    fn test_missing_path_segment_is_undefined_variable() {
+        // Mirrors a missing variable exactly: same kind, full dotted name.
+        let mut ctx = SimpleContext::new();
+        ctx.set("char", "alice", alice());
+        let template = parser::parse("{{char:alice.stats.luck}}").unwrap();
+        let registry = Registry::new();
+        let err = evaluate(&template, &mut ctx, &registry).unwrap_err();
+        assert_eq!(err.kind, EvalErrorKind::UndefinedVariable);
+        assert!(err.message.contains("alice.stats.luck"), "{}", err.message);
+    }
+
+    #[test]
+    fn test_indexing_a_non_object_is_a_type_error() {
+        // Distinct from "absent": hp exists, it just cannot be indexed.
+        let mut ctx = SimpleContext::new();
+        ctx.set("char", "alice", alice());
+        let template = parser::parse("{{char:alice.stats.hp.max}}").unwrap();
+        let registry = Registry::new();
+        let err = evaluate(&template, &mut ctx, &registry).unwrap_err();
+        assert_eq!(err.kind, EvalErrorKind::TypeError);
+        assert!(err.span.is_some(), "type error should carry a span");
+    }
+
+    #[test]
+    fn test_object_truthiness() {
+        let mut ctx = SimpleContext::new();
+        ctx.set("char", "alice", alice());
+        ctx.set(
+            "char",
+            "empty",
+            Value::object(Vec::<(String, Value)>::new()),
+        );
+        assert_eq!(
+            eval_with_ctx("{# if {{char:alice.stats}} #}yes{# endif #}", &mut ctx),
+            "yes"
+        );
+        assert_eq!(
+            eval_with_ctx(
+                "{# if {{char:empty}} #}yes{# else #}no{# endif #}",
+                &mut ctx
+            ),
+            "no"
+        );
+    }
+
+    #[test]
+    fn test_bare_variable_path_in_foreach() {
+        // The reason bare vars needed paths: arrays of objects.
+        let mut ctx = SimpleContext::new();
+        ctx.set(
+            "realm",
+            "npcs",
+            Value::Array(vec![
+                Value::object([("name", "Alice")]),
+                Value::object([("name", "Bob")]),
+            ]),
+        );
+        assert_eq!(
+            eval_with_ctx(
+                "{# foreach npc in {{realm:npcs}} #}{{npc.name}} {# endforeach #}",
+                &mut ctx
+            ),
+            "Alice Bob "
+        );
+    }
+
+    #[test]
+    fn test_local_scope_path_matches_bare_path() {
+        let mut ctx = SimpleContext::new();
+        ctx.set(
+            "realm",
+            "npcs",
+            Value::Array(vec![Value::object([("name", "Alice")])]),
+        );
+        assert_eq!(
+            eval_with_ctx(
+                "{# foreach npc in {{realm:npcs}} #}{{local:npc.name}}{# endforeach #}",
+                &mut ctx
+            ),
+            "Alice"
         );
     }
 
@@ -992,6 +1151,29 @@ mod tests {
         let opts = EvalOptions::new().lenient(true);
         let out = evaluate_with_options(&template, &mut ctx, &registry, opts).unwrap();
         assert_eq!(out, "{{char:alice.inventory}}");
+    }
+
+    #[test]
+    fn test_lenient_reconstruction_for_missing_segment() {
+        // The root resolves but the path does not — lenient mode still has
+        // to emit the whole reference, not the part it managed to reach.
+        let template = parser::parse("{{char:alice.stats.luck}}").unwrap();
+        let mut ctx = SimpleContext::new();
+        ctx.set("char", "alice", alice());
+        let registry = Registry::new();
+        let opts = EvalOptions::new().lenient(true);
+        let out = evaluate_with_options(&template, &mut ctx, &registry, opts).unwrap();
+        assert_eq!(out, "{{char:alice.stats.luck}}");
+    }
+
+    #[test]
+    fn test_lenient_reconstruction_for_bare_path() {
+        let template = parser::parse("{{npc.name}}").unwrap();
+        let mut ctx = SimpleContext::new();
+        let registry = Registry::new();
+        let opts = EvalOptions::new().lenient(true);
+        let out = evaluate_with_options(&template, &mut ctx, &registry, opts).unwrap();
+        assert_eq!(out, "{{npc.name}}");
     }
 
     #[test]

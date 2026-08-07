@@ -39,27 +39,58 @@ pub enum ExprKind {
     UnaryOp { op: UnaryOp, operand: Box<Expr> },
 }
 
+/// A variable reference: an optional scope, a name, and an optional dotted
+/// path that indexes into the resolved value.
+///
+/// The split between [`name`](Self::name) and [`path`](Self::path) is the
+/// boundary between the two halves of the language: the host owns the
+/// name-space (which scopes exist, what names they hold) and the language
+/// owns the value-space (everything after the first dot). In
+/// `{{char:alice.stats.hp}}` the host is asked for `alice`; the evaluator
+/// walks `stats.hp` into whatever it gets back.
 #[derive(Debug, Clone)]
 pub struct VariableRef {
     /// `None` for bare loop variables (`{{item}}`), `Some` for scoped
     /// variables (`{{global:name}}`).
     pub scope: Option<String>,
-    /// The variable name. For scoped variables this may be a dotted path
-    /// (`{{char:alice.inventory}}` yields `name == "alice.inventory"`). The
-    /// path is opaque to the evaluator and passed to the host verbatim;
-    /// use [`VariableRef::path_segments`] to split it. Bare loop bindings
-    /// are always single-segment.
+    /// The root variable name — the part the host resolves. Never contains
+    /// a dot.
     pub name: String,
+    /// Trailing path segments that index into the resolved value. Empty for
+    /// a plain reference; `["stats", "hp"]` for `{{char:alice.stats.hp}}`.
+    ///
+    /// Every non-leaf segment must resolve to a [`crate::Value::Object`].
+    pub path: Vec<String>,
 }
 
 impl VariableRef {
-    /// Split [`name`](Self::name) into its dotted path segments.
+    /// All dotted segments, root first.
     ///
-    /// `"alice.inventory"` yields `["alice", "inventory"]`; a plain name
-    /// yields a single-element slice. Useful for hosts that store nested
-    /// state and want to walk the path themselves.
+    /// `{{char:alice.stats.hp}}` yields `["alice", "stats", "hp"]`; a plain
+    /// name yields a single element.
     pub fn path_segments(&self) -> impl Iterator<Item = &str> {
-        self.name.split('.')
+        std::iter::once(self.name.as_str()).chain(self.path.iter().map(String::as_str))
+    }
+
+    /// The dotted name as written, root included: `"alice.stats.hp"`.
+    ///
+    /// Used for diagnostics — the host never sees this form.
+    pub fn full_name(&self) -> String {
+        if self.path.is_empty() {
+            return self.name.clone();
+        }
+        self.path_segments().collect::<Vec<_>>().join(".")
+    }
+
+    /// Reconstruct the source form, `{{scope:name.path}}` or `{{name}}`.
+    ///
+    /// This is what lenient mode emits in place of a reference it could not
+    /// resolve, so the output is re-parseable.
+    pub fn to_source(&self) -> String {
+        match &self.scope {
+            Some(scope) => format!("{{{{{}:{}}}}}", scope, self.full_name()),
+            None => format!("{{{{{}}}}}", self.full_name()),
+        }
     }
 }
 

@@ -147,15 +147,20 @@ fn build_variable(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<Par
         Rule::scoped_var => {
             let mut parts = inner.into_inner();
             let scope = parts.next().unwrap().as_str().to_string();
-            let name = parts.next().unwrap().as_str().to_string();
+            let (name, path) = split_var_path(parts.next().unwrap().as_str());
             Ok(ExprKind::Variable(VariableRef {
                 scope: Some(scope),
                 name,
+                path,
             }))
         }
         Rule::bare_var => {
-            let name = inner.into_inner().next().unwrap().as_str().to_string();
-            Ok(ExprKind::Variable(VariableRef { scope: None, name }))
+            let (name, path) = split_var_path(inner.into_inner().next().unwrap().as_str());
+            Ok(ExprKind::Variable(VariableRef {
+                scope: None,
+                name,
+                path,
+            }))
         }
         _ => unreachable!(),
     }
@@ -489,6 +494,19 @@ fn split_dotted_name(dotted: &str) -> (String, String) {
     }
 }
 
+/// Split a variable's dotted name into its root and the path that indexes
+/// into the resolved value.
+///
+/// The opposite grouping from [`split_dotted_name`], which splits a
+/// processor's `namespace.name` at the *last* dot: a variable's host-facing
+/// name is the *first* segment and everything after it belongs to the
+/// value.
+fn split_var_path(dotted: &str) -> (String, Vec<String>) {
+    let mut segments = dotted.split('.');
+    let root = segments.next().unwrap_or_default().to_string();
+    (root, segments.map(str::to_string).collect())
+}
+
 fn extract_string_content(pair: pest::iterators::Pair<Rule>) -> String {
     // quoted_string = ${ "\"" ~ string_inner ~ "\"" }
     let inner = pair.into_inner().next().map(|p| p.as_str()).unwrap_or("");
@@ -793,16 +811,19 @@ mod tests {
 
     #[test]
     fn test_dotted_scoped_variable() {
+        // The root is the host-facing name; the rest indexes into the value.
         let template = parse("{{char:alice.inventory}}").unwrap();
         assert_eq!(template.nodes.len(), 1);
         match &template.nodes[0].node {
             NodeKind::Expression(ExprKind::Variable(v)) => {
                 assert_eq!(v.scope, Some("char".to_string()));
-                assert_eq!(v.name, "alice.inventory");
+                assert_eq!(v.name, "alice");
+                assert_eq!(v.path, ["inventory"]);
                 assert_eq!(
                     v.path_segments().collect::<Vec<_>>(),
                     ["alice", "inventory"]
                 );
+                assert_eq!(v.full_name(), "alice.inventory");
             }
             _ => panic!("expected variable"),
         }
@@ -814,17 +835,53 @@ mod tests {
         match &template.nodes[0].node {
             NodeKind::Expression(ExprKind::Variable(v)) => {
                 assert_eq!(v.scope, Some("world".to_string()));
-                assert_eq!(v.name, "region.north.weather");
+                assert_eq!(v.name, "region");
+                assert_eq!(v.path, ["north", "weather"]);
             }
             _ => panic!("expected variable"),
         }
     }
 
     #[test]
-    fn test_bare_variable_rejects_dots() {
-        // Bare loop bindings stay single-segment; a dotted bare var is a
-        // parse error, not a silently-accepted path.
-        assert!(parse("{{item.field}}").is_err());
+    fn test_bare_variable_takes_a_path() {
+        // A loop binding is still a single-segment name, but the value it
+        // holds can be indexed: {# foreach npc in ... #}{{npc.name}}.
+        let template = parse("{{item.field}}").unwrap();
+        match &template.nodes[0].node {
+            NodeKind::Expression(ExprKind::Variable(v)) => {
+                assert_eq!(v.scope, None);
+                assert_eq!(v.name, "item");
+                assert_eq!(v.path, ["field"]);
+            }
+            _ => panic!("expected bare variable"),
+        }
+    }
+
+    #[test]
+    fn test_plain_variable_has_empty_path() {
+        let template = parse("{{global:hp}}").unwrap();
+        match &template.nodes[0].node {
+            NodeKind::Expression(ExprKind::Variable(v)) => {
+                assert_eq!(v.name, "hp");
+                assert!(v.path.is_empty());
+                assert_eq!(v.full_name(), "hp");
+            }
+            _ => panic!("expected variable"),
+        }
+    }
+
+    #[test]
+    fn test_processor_namespace_splits_at_last_dot() {
+        // Variables split at the FIRST dot, processors at the last — the
+        // two dotted forms mean different things and must not converge.
+        let template = parse("@[core.text.upper(text: \"x\")]").unwrap();
+        match &template.nodes[0].node {
+            NodeKind::Expression(ExprKind::ProcessorCall(p)) => {
+                assert_eq!(p.namespace, "core.text");
+                assert_eq!(p.name, "upper");
+            }
+            _ => panic!("expected processor call"),
+        }
     }
 
     #[test]

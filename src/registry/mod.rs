@@ -142,6 +142,8 @@ pub enum ValueType {
     Number,
     Bool,
     Array,
+    /// A string-keyed map. Mirrors [`Value::Object`].
+    Object,
     /// The absence of a value. Mirrors [`Value::None`] — used as a return
     /// type for commands that produce no output in template position.
     None,
@@ -158,6 +160,7 @@ impl ValueType {
             ValueType::Number => matches!(value, Value::Number(_)),
             ValueType::Bool => matches!(value, Value::Bool(_)),
             ValueType::Array => matches!(value, Value::Array(_)),
+            ValueType::Object => matches!(value, Value::Object(_)),
             ValueType::None => matches!(value, Value::None),
         }
     }

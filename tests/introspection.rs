@@ -224,3 +224,16 @@ fn value_type_none_survives_a_round_trip() {
         ValueType::None
     );
 }
+
+#[cfg(feature = "serde")]
+#[test]
+fn value_type_object_survives_a_round_trip() {
+    // Editors consume this tag from the vocabulary payload — it has to be
+    // the snake_case name, like every other variant.
+    let json = serde_json::to_value(ValueType::Object).unwrap();
+    assert_eq!(json, serde_json::json!("object"));
+    assert_eq!(
+        serde_json::from_value::<ValueType>(json).unwrap(),
+        ValueType::Object
+    );
+}
