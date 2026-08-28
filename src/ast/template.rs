@@ -32,6 +32,25 @@ pub enum NodeKind {
 
     /// Loop block: `{# foreach item in expr #}...{# endforeach #}`
     ForEach(ForEachBlock),
+
+    /// `{# break #}` — stop the innermost enclosing `foreach`.
+    Break,
+
+    /// `{# continue #}` — skip to the next iteration of the innermost
+    /// enclosing `foreach`.
+    Continue,
+
+    /// `{# return #}` or `{# return expr #}` — stop evaluating this
+    /// template and make `expr` its value, discarding the output rendered
+    /// before it.
+    ///
+    /// `None` is a bare `{# return #}`, which is sugar for
+    /// `{# return none #}` — the same thing a bare `return;` means
+    /// anywhere else.
+    Return(Option<Expr>),
+
+    /// `{# stop #}` — end evaluation and keep the output rendered so far.
+    Stop,
 }
 
 #[derive(Debug, Clone)]

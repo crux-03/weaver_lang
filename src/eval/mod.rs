@@ -32,8 +32,43 @@ pub fn evaluate(
     ctx: &mut impl EvalContext,
     registry: &Registry,
 ) -> Result<String, EvalError> {
+    Ok(evaluate_value(template, ctx, registry)?.to_output_string())
+}
+
+/// Evaluate a template and return its [`Value`].
+///
+/// A template's result is a value; the string produced by [`evaluate`] is
+/// that value passed through [`Value::to_output_string`]. For a template
+/// with no `{# return expr #}` the value is simply
+/// [`Value::String`] holding the rendered output.
+///
+/// ```rust
+/// use weaver_lang::{parse, evaluate_value, SimpleContext, Registry, Value};
+///
+/// let registry = Registry::new();
+/// let mut ctx = SimpleContext::new();
+///
+/// // No return: the value is the rendered output.
+/// let plain = parse("Hello").unwrap();
+/// assert_eq!(
+///     evaluate_value(&plain, &mut ctx, &registry).unwrap(),
+///     Value::String("Hello".into()),
+/// );
+///
+/// // A valued return replaces the output entirely.
+/// let tags = parse(r#"ignored{# return ["sword", "cursed"] #}"#).unwrap();
+/// assert_eq!(
+///     evaluate_value(&tags, &mut ctx, &registry).unwrap(),
+///     Value::Array(vec!["sword".into(), "cursed".into()]),
+/// );
+/// ```
+pub fn evaluate_value(
+    template: &Template,
+    ctx: &mut impl EvalContext,
+    registry: &Registry,
+) -> Result<Value, EvalError> {
     let mut evaluator = Evaluator::new(EvalOptions::default());
-    evaluator.eval_template(template, ctx, registry)
+    evaluator.eval_template_value(template, ctx, registry)
 }
 
 /// Evaluate a parsed expression and return its [`Value`] directly.
@@ -117,8 +152,21 @@ pub fn evaluate_with_options(
     registry: &Registry,
     options: EvalOptions,
 ) -> Result<String, EvalError> {
+    Ok(evaluate_value_with_options(template, ctx, registry, options)?.to_output_string())
+}
+
+/// Evaluate a template with custom options and return its [`Value`].
+///
+/// The value counterpart to [`evaluate_with_options`]; see
+/// [`evaluate_value`] for what the returned value means.
+pub fn evaluate_value_with_options(
+    template: &Template,
+    ctx: &mut impl EvalContext,
+    registry: &Registry,
+    options: EvalOptions,
+) -> Result<Value, EvalError> {
     let mut evaluator = Evaluator::new(options);
-    evaluator.eval_template(template, ctx, registry)
+    evaluator.eval_template_value(template, ctx, registry)
 }
 
 // ── Evaluation options ──────────────────────────────────────────────────
@@ -231,11 +279,32 @@ impl ScopeFrame {
     }
 }
 
+/// A pending flow signal, set by a flow statement and consumed by the
+/// construct that owns it.
+///
+/// This is deliberately a field on the evaluator rather than a variant on
+/// [`EvalError`]. Lenient mode turns *any* `Err` from a command into
+/// passthrough text (see `eval_node`), so a flow signal travelling as an
+/// error would be silently swallowed and rendered into the output.
+#[derive(Debug, Clone)]
+enum Flow {
+    /// Consumed by the innermost `foreach`.
+    Break,
+    /// Consumed by the innermost `foreach`.
+    Continue,
+    /// Never consumed by a loop. Returns the inner [`Value`].
+    Return(Value),
+    /// Similar to [`Flow::Return`], but returns the accumulated content so far.
+    Stop,
+}
+
 struct Evaluator {
     scopes: Vec<ScopeFrame>,
     options: EvalOptions,
     node_count: u64,
     iteration_count: u64,
+    /// Set by a flow statement, cleared by whatever handles it.
+    flow: Option<Flow>,
 }
 
 impl Evaluator {
@@ -245,7 +314,26 @@ impl Evaluator {
             options,
             node_count: 0,
             iteration_count: 0,
+            flow: None,
         }
+    }
+
+    /// Evaluate a template and resolve the flow state into a [`Value`].
+    fn eval_template_value(
+        &mut self,
+        template: &Template,
+        ctx: &mut impl EvalContext,
+        registry: &Registry,
+    ) -> Result<Value, EvalError> {
+        let output = self.eval_template(template, ctx, registry)?;
+        Ok(match self.flow.take() {
+            // This is an explicit return in the form of `{# return expr #}`
+            // (or `{# return #}`)
+            Some(Flow::Return(value)) => value,
+            // `{# stop #}` and a template that simply ran to the end return
+            // the rendered output (thus far)
+            _ => Value::String(output),
+        })
     }
 
     fn push_scope(&mut self) {
@@ -326,17 +414,30 @@ impl Evaluator {
 
         let mut i = 0;
         while i < len {
+            // A flow statement anywhere in this template stops it here.
+            if self.flow.is_some() {
+                break;
+            }
+
             match &nodes[i].node {
-                NodeKind::Command(_) | NodeKind::Expression(_) => {
+                NodeKind::Command(_)
+                | NodeKind::Expression(_)
+                | NodeKind::IfBlock(_)
+                | NodeKind::ForEach(_) => {
                     // Check if this node is standalone on its line.
                     let info = check_standalone(&output, nodes, i);
 
                     // Standalone commands always consume their line (their
-                    // return value is discarded). Standalone expressions
-                    // consume their line only when they render to nothing —
-                    // empty or whitespace-only, e.g. a `none` variable or an
-                    // empty document. A standalone expression that renders
-                    // content keeps its line exactly as written.
+                    // return value is discarded). Everything else consumes
+                    // its line only when it renders to nothing — empty or
+                    // whitespace-only, e.g. a `none` variable, an empty
+                    // document, or a block whose branch produced nothing.
+                    // Anything that renders content keeps its line.
+                    //
+                    // Blocks take this same path rather than being resolved
+                    // in the parser, because whether a block occupies a line
+                    // of *output* depends on what its body rendered, which
+                    // the parser cannot know.
                     let (consume_line, skip_newline) = if !info.is_standalone {
                         let fragment = self.eval_node(&nodes[i], ctx, registry)?;
                         output.push_str(&fragment);
@@ -350,11 +451,23 @@ impl Evaluator {
                         if fragment.trim().is_empty() {
                             (true, true)
                         } else {
-                            // The fragment replaces the line's content. If it
-                            // already ends with a newline (e.g. a multi-line
-                            // document include), it supplies the line
-                            // terminator itself — skip the line's own
-                            // trailing newline to avoid doubling it.
+                            // The indent before an opening tag belongs to
+                            // that tag's line. A block body carries its own
+                            // indentation, so keeping both would double it.
+                            // An expression is the opposite: the indent is
+                            // its rendered line's own and must stay.
+                            let is_block = matches!(
+                                &nodes[i].node,
+                                NodeKind::IfBlock(_) | NodeKind::ForEach(_)
+                            );
+                            if is_block
+                                && info.ws_only_trim > 0
+                                && output.len() >= info.ws_only_trim
+                            {
+                                let new_len = output.len() - info.ws_only_trim;
+                                output.truncate(new_len);
+                            }
+
                             let supplies_newline = fragment.ends_with('\n');
                             output.push_str(&fragment);
                             (false, supplies_newline)
@@ -439,6 +552,28 @@ impl Evaluator {
             }
             NodeKind::IfBlock(block) => self.eval_if_block(block, ctx, registry),
             NodeKind::ForEach(block) => self.eval_foreach(block, ctx, registry),
+
+            NodeKind::Break => {
+                self.flow = Some(Flow::Break);
+                Ok(String::new())
+            }
+            NodeKind::Stop => {
+                self.flow = Some(Flow::Stop);
+                Ok(String::new())
+            }
+            NodeKind::Continue => {
+                self.flow = Some(Flow::Continue);
+                Ok(String::new())
+            }
+            NodeKind::Return(value) => {
+                let value = match value {
+                    Some(expr) => self.eval_expr(expr, ctx, registry)?,
+                    // Bare `{# return #}` is `{# return none #}`.
+                    None => Value::None,
+                };
+                self.flow = Some(Flow::Return(value));
+                Ok(String::new())
+            }
         }
     }
 
@@ -529,20 +664,20 @@ impl Evaluator {
 
             ExprKind::Document(doc) => {
                 let document_id = self.eval_id_expr(&doc.document_id, ctx, registry)?;
-                let result = ctx.resolve_document(&document_id, registry).map_err(|e| {
-                    if e.span.is_none() {
-                        e.with_span(span)
-                    } else {
-                        e
-                    }
-                });
+                let result = ctx
+                    .resolve_document_value(&document_id, registry)
+                    .map_err(|e| {
+                        if e.span.is_none() {
+                            e.with_span(span)
+                        } else {
+                            e
+                        }
+                    });
 
                 if self.options.lenient {
-                    result
-                        .map(Value::String)
-                        .or_else(|_| Ok(Value::String(reconstruct_document(&document_id))))
+                    result.or_else(|_| Ok(Value::String(reconstruct_document(&document_id))))
                 } else {
-                    Ok(Value::String(result?))
+                    result
                 }
             }
 
@@ -743,8 +878,25 @@ impl Evaluator {
             self.bind(block.binding.clone(), item);
             let fragment = self.eval_template(&block.body, ctx, registry)?;
             output.push_str(&fragment);
+
+            match self.flow {
+                Some(Flow::Break) => {
+                    self.flow = None;
+                    break;
+                }
+                Some(Flow::Continue) => {
+                    self.flow = None;
+                }
+                // Return and Stop belong to the template, not the loop:
+                // leave them set so they propagate past every enclosing
+                // block.
+                Some(Flow::Return(_) | Flow::Stop) => break,
+                None => {}
+            }
         }
 
+        // Reached on every path, including a propagating return — the
+        // loop exits by `break`, never by an early `return` from here.
         self.pop_scope();
 
         Ok(output)

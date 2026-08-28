@@ -58,6 +58,8 @@ assert_eq!(template.evaluate(&mut ctx, &registry).unwrap(), "HP: 42");
 | documents  | `[[some_id]]`                                         |
 | if/else    | `{# if foo == bar #} baz {# endif #}`                 |
 | foreach    | `{# foreach foo in bar #} - {{foo}} {# endforeach #}` |
+| flow       | `{# break #}`, `{# continue #}`, `{# return expr #}`, `{# stop #}` |
+| trim       | `{#- ... -#}`, `{{- ... -}}`, `$[- ... -]`            |
 
 ### Variables
 
@@ -169,6 +171,158 @@ Triggers and documents are almost functionally identical, but they differ semant
 ```
 
 Control flow tags on their own lines don't produce blank lines in the output.
+
+A construct is treated as occupying its own line when it sits at a line
+start in the **rendered output** and is followed by a newline. What happens
+then depends only on what it rendered:
+
+- nothing, or only whitespace — the line is consumed entirely
+- text ending in a newline — it supplies the line terminator, so the line's
+  own trailing newline is dropped rather than doubled
+- text not ending in a newline — the line's newline is still needed and is kept
+
+Commands are the one exception: a standalone command always consumes its
+line, because its return value is discarded in template position.
+
+Because the rule reads rendered output, the two ways of writing a block
+agree:
+
+```
+{# if true #}yes{# endif #}      both render "yes\n"
+{# if true #}
+yes
+{# endif #}
+```
+
+### Flow statements
+
+```
+{# break #}       stop the innermost foreach
+{# continue #}    skip to the next iteration
+{# return expr #} stop evaluating this template; expr is its value
+{# return #}      sugar for {# return none #}
+{# stop #}        stop evaluating; keep the output rendered so far
+```
+
+`return` and `stop` are legal anywhere. `break` and `continue` are rejected
+at parse time outside a `foreach`. An `if` does not introduce a loop, so `{# if ... #}{# break #}{# endif #}` at
+the top level is an error, while the same thing inside a loop body is fine.
+
+Flow never crosses an entry boundary. Triggers and documents re-enter
+through the host with a fresh evaluator, so a `break` inside an included
+document cannot terminate the including template's loop.
+
+### Return values
+
+Weaver is designed to both be functional and act as a template language,
+because of this, it provides an alternative way to structure your files
+in the form of return values. This means that your template will return
+either whatever is passed into the first evaluated return statement,
+or falls back to the template's rendered content.
+
+A template's result is a **`Value`**, and its rendered text is that value
+passed through `to_output_string()`. `evaluate` is a thin wrapper over
+`evaluate_value`.
+
+`{# return expr #}` makes `expr` the result, discarding whatever was
+rendered before it. A bare `{# return #}` is sugar for `{# return none #}`.
+
+```
+{# if {{global:hp}} > 50 #}{# return #}{# endif #}
+Wounded: {{global:hp}} HP
+```
+
+An entry guarded like this renders nothing at all when the condition holds.
+
+`{# stop #}` is the other half: it produces no value and **keeps** the text
+rendered so far, so it truncates rather than replaces.
+
+```
+Intro paragraph.
+{# foreach x in {{global:items}} #}
+  - {{x}}
+{# endforeach #}
+{# stop #}
+
+Draft notes that never reach the output.
+```
+
+| | value | rendered text |
+|---|---|---|
+| `{# return expr #}` | `expr` | discarded |
+| `{# return #}` | `none` | discarded |
+| `{# stop #}` | the text | kept |
+
+```rust
+use weaver_lang::{render, render_value, SimpleContext, Registry, Value};
+
+let mut ctx = SimpleContext::new();
+let registry = Registry::new();
+
+let src = r#"ignored{# return ["sword", "cursed"] #}"#;
+assert_eq!(
+    render_value(src, &mut ctx, &registry).unwrap(),
+    Value::Array(vec!["sword".into(), "cursed".into()]),
+);
+// The string form is the same value, joined.
+assert_eq!(render(src, &mut ctx, &registry).unwrap(), "sword, cursed");
+```
+
+| terminal state       | `evaluate_value`      | `evaluate`                |
+|----------------------|-----------------------|---------------------------|
+| ran to the end       | `String(output)`      | output                    |
+| `{# stop #}`         | `String(output)`      | output up to the stop     |
+| `{# return #}`       | `None`                | `""`                      |
+| `{# return expr #}`  | `expr`                | `expr.to_output_string()` |
+
+`evaluate_value` is defined for every template, not only ones that return,
+so hosts can adopt it without changing any existing template.
+
+An entry that needs to emit prose *and* hand the host a payload should
+stash the payload through the context — `$[set_var("local:tags", ...)]` —
+and use no `return` at all — or `{# stop #}` — so the prose stays the
+result. Note that `{# return #}` is *not* the way to do this: it returns
+none and discards the prose.
+
+To let one entry return a value to *another*, override
+`EvalContext::resolve_document_value`; see
+[Implementing EvalContext](#implementing-evalcontext).
+
+### Whitespace trim markers
+
+A `-` immediately inside a delimiter removes all whitespace on that side,
+newlines included. It works on every construct that produces output:
+
+```
+{#- if {{global:hp}} < 20 -#}
+{{- global:name -}}
+$[- set_var("global:x", "v") -]
+@[- math.add(a: 1, b: 2) -]
+```
+
+```rust
+use weaver_lang::{render, SimpleContext, Registry};
+
+let mut ctx = SimpleContext::new();
+ctx.set("global", "name", "Alice");
+let registry = Registry::new();
+
+assert_eq!(
+    render("A   {{global:name}}   B", &mut ctx, &registry).unwrap(),
+    "A   Alice   B",
+);
+assert_eq!(
+    render("A   {{-global:name-}}   B", &mut ctx, &registry).unwrap(),
+    "AAliceB",
+);
+```
+
+There is no ambiguity with subtraction or unary minus: `{# if x - 1 -#}`
+parses as `x - 1` followed by a marker, and `{# if -1 < 0 #}` is unaffected.
+
+Note that a marker is **all or nothing**. It cannot collapse a run of blank lines
+  down to exactly one newline. You choose between all the whitespace and
+  none of it.
 
 ### Expressions and operators
 
@@ -305,6 +459,48 @@ impl EvalContext for GameContext {
 }
 ```
 
+### Documents that return values
+
+`resolve_document_value` has a default implementation that wraps
+`resolve_document` in a `Value::String`, which is exactly the old
+behaviour. Override it when your entries use `{# return #}`, and a
+document becomes a value-producing unit that other entries can consume:
+
+```rust
+# use weaver_lang::{EvalContext, EvalError, Registry, Value, parse, evaluate_value};
+# struct GameContext;
+# impl GameContext { fn source_of(&self, _id: &str) -> String { String::new() } }
+# impl EvalContext for GameContext {
+#     fn resolve_variable(&self, _s: &str, _n: &str) -> Result<Option<Value>, EvalError> { Ok(None) }
+#     fn set_variable(&mut self, _s: &str, _n: &str, _v: Value) -> Result<(), EvalError> { Ok(()) }
+#     fn fire_trigger(&mut self, _i: &str, _r: &Registry) -> Result<String, EvalError> { Ok(String::new()) }
+#     fn resolve_document(&mut self, id: &str, r: &Registry) -> Result<String, EvalError> {
+#         Ok(self.resolve_document_value(id, r)?.to_output_string())
+#     }
+fn resolve_document_value(
+    &mut self,
+    document_id: &str,
+    registry: &Registry,
+) -> Result<Value, EvalError> {
+    let source = self.source_of(document_id);
+    let template = parse(&source).map_err(|_| EvalError::host_error("parse failed"))?;
+    evaluate_value(&template, self, registry)
+}
+# }
+```
+
+```
+// LOOT_TABLE:  {# return ["sword", "shield", "potion"] #}
+
+{# foreach item in [[LOOT_TABLE]] #}
+  - {{item}}
+{# endforeach #}
+```
+
+There is deliberately no trigger counterpart. A trigger marks another
+entry for activation rather than producing content, so it has no value to
+carry.
+
 The evaluator manages temporary scopes internally (foreach bindings). Only named scope operations like `"global"` and `"local"` reach the host.
 
 ### Pushing paths down into storage
@@ -380,6 +576,7 @@ let err = EvalError::host_error("failed to load entry").with_source(io_err);
 
 - All numbers are `f64`. Large integers above 2^53 lose precision.
 - No assignment syntax in the language. Variable mutation goes through commands which hosts need to define.
+- Trim markers are all-or-nothing: `-` removes every whitespace character on its side, so it cannot collapse a run of blank lines to exactly one newline. This is shared with Jinja and Liquid.
 - Document evaluation depends on the host's `resolve_document` implementation.
 - Object support is read-only and partial: no object literals, no iteration, no equality, and paths index objects only. Array indexing (`items[0]`) and slicing are not supported — path segments are identifiers, so a numeric segment does not parse.
 

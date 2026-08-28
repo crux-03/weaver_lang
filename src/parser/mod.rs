@@ -35,22 +35,60 @@ pub fn parse(source: &str) -> Result<Template, Vec<ParseError>> {
     // We need to iterate its inner children (the actual nodes).
     for pair in pairs {
         if pair.as_rule() == Rule::template {
-            for inner in pair.into_inner() {
-                match inner.as_rule() {
-                    Rule::EOI => break,
-                    _ => {
-                        if let Some(node) = build_node(inner)? {
-                            nodes.push(node);
-                        }
-                    }
-                }
-            }
+            nodes = build_nodes(pair.into_inner())?;
         }
     }
 
     let mut template = Template { nodes };
     normalize_whitespace(&mut template);
+
+    let mut flow_errors = Vec::new();
+    validate_flow(&template, 0, &mut flow_errors);
+    if !flow_errors.is_empty() {
+        return Err(flow_errors);
+    }
+
     Ok(template)
+}
+
+/// Reject `{# break #}` and `{# continue #}` outside a `foreach`.
+///
+/// Only `foreach` increments the depth — an `if` inside a loop is still
+/// inside that loop, so every branch inherits the enclosing depth.
+/// `{# return #}` is legal anywhere and is not checked here.
+///
+/// The walk stops at the entry boundary by construction: a document or
+/// trigger is an expression, not a nested template, so there is nothing
+/// to descend into.
+fn validate_flow(template: &Template, loop_depth: usize, errors: &mut Vec<ParseError>) {
+    for node in &template.nodes {
+        match &node.node {
+            NodeKind::Break | NodeKind::Continue if loop_depth == 0 => {
+                let keyword = match node.node {
+                    NodeKind::Break => "break",
+                    _ => "continue",
+                };
+                errors.push(
+                    ParseError::new(node.span, format!("`{keyword}` outside of a loop")).with_hint(
+                        format!(
+                            "`{keyword}` is only valid inside a                              {{# foreach ... #}} block"
+                        ),
+                    ),
+                );
+            }
+            NodeKind::IfBlock(block) => {
+                validate_flow(&block.body, loop_depth, errors);
+                for elif in &block.elif_branches {
+                    validate_flow(&elif.body, loop_depth, errors);
+                }
+                if let Some(else_body) = &block.else_body {
+                    validate_flow(else_body, loop_depth, errors);
+                }
+            }
+            NodeKind::ForEach(block) => validate_flow(&block.body, loop_depth + 1, errors),
+            _ => {}
+        }
+    }
 }
 
 /// Parse a standalone expression from source text.
@@ -95,54 +133,167 @@ fn pair_span(pair: &pest::iterators::Pair<Rule>) -> Span {
     Span::new(s.start(), s.end())
 }
 
+// -- Trim markers --------------------------------------------------------
+
+/// The trim markers written on one construct's delimiters.
+///
+/// These never reach the AST. They are applied while it is built, by
+/// trimming the neighbouring `Literal` nodes, so whitespace removal is a
+/// property of the source text rather than of what happened to render.
+#[derive(Debug, Clone, Copy, Default)]
+struct Trim {
+    left: bool,
+    right: bool,
+}
+
+impl Trim {
+    /// Read the markers off a construct's own delimiters.
+    ///
+    /// Only direct children are inspected, so markers belonging to a
+    /// nested construct inside an expression are not picked up here.
+    fn of(pair: &pest::iterators::Pair<Rule>) -> Self {
+        let mut trim = Trim::default();
+        for child in pair.clone().into_inner() {
+            match child.as_rule() {
+                Rule::trim_l => trim.left = true,
+                Rule::trim_r => trim.right = true,
+                _ => {}
+            }
+        }
+        trim
+    }
+}
+
+/// A pair's children with the trim markers filtered out, so the existing
+/// positional builders keep working unchanged.
+fn content_pairs(
+    pair: pest::iterators::Pair<'_, Rule>,
+) -> impl Iterator<Item = pest::iterators::Pair<'_, Rule>> {
+    pair.into_inner()
+        .filter(|p| !matches!(p.as_rule(), Rule::trim_l | Rule::trim_r))
+}
+
+/// Build a sibling node list and apply each node's outward trim markers to
+/// its neighbours.
+///
+/// Trimming is local to one list: a marker on the first node of a block
+/// body has no literal to its left and simply does nothing. Reaching
+/// across the block boundary is the job of the block's own tag markers.
+fn build_nodes<'a>(
+    pairs: impl Iterator<Item = pest::iterators::Pair<'a, Rule>>,
+) -> Result<Vec<Node>, Vec<ParseError>> {
+    let mut items = Vec::new();
+    for pair in pairs {
+        if pair.as_rule() == Rule::EOI {
+            break;
+        }
+        if let Some(built) = build_node(pair)? {
+            items.push(built);
+        }
+    }
+
+    let trims: Vec<Trim> = items.iter().map(|(_, t)| *t).collect();
+    let mut nodes: Vec<Node> = items.into_iter().map(|(n, _)| n).collect();
+
+    for (i, trim) in trims.iter().enumerate() {
+        if trim.left && i > 0 {
+            trim_literal_end(&mut nodes[i - 1]);
+        }
+        if trim.right && i + 1 < nodes.len() {
+            trim_literal_start(&mut nodes[i + 1]);
+        }
+    }
+
+    Ok(nodes)
+}
+
+/// Remove all trailing whitespace, newlines included, from a literal node.
+/// Any other node kind is left alone.
+fn trim_literal_end(node: &mut Node) {
+    if let NodeKind::Literal(text) = &mut node.node {
+        let trimmed = text.trim_end().len();
+        text.truncate(trimmed);
+    }
+}
+
+/// Remove all leading whitespace, newlines included, from a literal node.
+fn trim_literal_start(node: &mut Node) {
+    if let NodeKind::Literal(text) = &mut node.node {
+        let offset = text.len() - text.trim_start().len();
+        text.drain(..offset);
+    }
+}
+
+/// Apply a `-#}` marker to the start of a block body.
+fn trim_body_start(template: &mut Template) {
+    if let Some(first) = template.nodes.first_mut() {
+        trim_literal_start(first);
+    }
+}
+
+/// Apply a `{#-` marker to the end of a block body.
+fn trim_body_end(template: &mut Template) {
+    if let Some(last) = template.nodes.last_mut() {
+        trim_literal_end(last);
+    }
+}
+
 // -- Node building -------------------------------------------------------
 
-fn build_node(pair: pest::iterators::Pair<Rule>) -> Result<Option<Node>, Vec<ParseError>> {
+/// Build one node, along with the trim markers that face its siblings.
+///
+/// For a block the outward markers come from opposite tags: the left one
+/// from `{#- if`, the right one from `endif -#}`. The markers facing
+/// *into* the block are consumed by the block builder itself.
+fn build_node(pair: pest::iterators::Pair<Rule>) -> Result<Option<(Node, Trim)>, Vec<ParseError>> {
     let span = pair_span(&pair);
+    let trim = Trim::of(&pair);
 
-    match pair.as_rule() {
+    let node = match pair.as_rule() {
         Rule::literal_text => {
             let text = pair.as_str().to_string();
-            Ok(Some(Spanned::new(NodeKind::Literal(text), span)))
+            NodeKind::Literal(text)
         }
-        Rule::variable => {
-            let expr_kind = build_variable(pair)?;
-            Ok(Some(Spanned::new(NodeKind::Expression(expr_kind), span)))
-        }
-        Rule::processor_call => {
-            let expr_kind = build_processor_call(pair)?;
-            Ok(Some(Spanned::new(NodeKind::Expression(expr_kind), span)))
-        }
+        Rule::variable => NodeKind::Expression(build_variable(pair)?),
+        Rule::processor_call => NodeKind::Expression(build_processor_call(pair)?),
         Rule::command_node => {
-            // command_node wraps a command_call
+            // command_node wraps a command_call, which carries the markers.
             let inner = pair.into_inner().next().unwrap();
+            let trim = Trim::of(&inner);
             let cmd = build_command_call(inner)?;
-            Ok(Some(Spanned::new(NodeKind::Command(cmd), span)))
+            return Ok(Some((Spanned::new(NodeKind::Command(cmd), span), trim)));
         }
-        Rule::trigger => {
-            let expr_kind = build_trigger(pair)?;
-            Ok(Some(Spanned::new(NodeKind::Expression(expr_kind), span)))
-        }
-        Rule::document_ref => {
-            let expr_kind = build_document_ref(pair)?;
-            Ok(Some(Spanned::new(NodeKind::Expression(expr_kind), span)))
-        }
+        Rule::trigger => NodeKind::Expression(build_trigger(pair)?),
+        Rule::document_ref => NodeKind::Expression(build_document_ref(pair)?),
         Rule::if_block => {
-            let if_block = build_if_block(pair)?;
-            Ok(Some(Spanned::new(NodeKind::IfBlock(if_block), span)))
+            let (block, trim) = build_if_block(pair)?;
+            return Ok(Some((Spanned::new(NodeKind::IfBlock(block), span), trim)));
         }
         Rule::foreach_block => {
-            let foreach = build_foreach_block(pair)?;
-            Ok(Some(Spanned::new(NodeKind::ForEach(foreach), span)))
+            let (block, trim) = build_foreach_block(pair)?;
+            return Ok(Some((Spanned::new(NodeKind::ForEach(block), span), trim)));
         }
-        _ => Ok(None),
-    }
+        Rule::break_stmt => NodeKind::Break,
+        Rule::stop_stmt => NodeKind::Stop,
+        Rule::continue_stmt => NodeKind::Continue,
+        Rule::return_stmt => {
+            // The inner `expr` is present only for `{# return expr #}`.
+            let value = match content_pairs(pair).next() {
+                Some(inner) => Some(build_expr(inner)?),
+                None => None,
+            };
+            NodeKind::Return(value)
+        }
+        _ => return Ok(None),
+    };
+
+    Ok(Some((Spanned::new(node, span), trim)))
 }
 
 // -- Expression building -------------------------------------------------
 
 fn build_variable(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
-    let inner = pair.into_inner().next().unwrap();
+    let inner = content_pairs(pair).next().unwrap();
     match inner.as_rule() {
         Rule::scoped_var => {
             let mut parts = inner.into_inner();
@@ -167,7 +318,7 @@ fn build_variable(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<Par
 }
 
 fn build_processor_call(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
-    let mut inner = pair.into_inner();
+    let mut inner = content_pairs(pair);
     let dotted = inner.next().unwrap().as_str().to_string();
     let (namespace, name) = split_dotted_name(&dotted);
 
@@ -196,7 +347,7 @@ fn build_processor_call(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, V
 }
 
 fn build_command_call(pair: pest::iterators::Pair<Rule>) -> Result<CommandCall, Vec<ParseError>> {
-    let mut inner = pair.into_inner();
+    let mut inner = content_pairs(pair);
     let name = inner.next().unwrap().as_str().to_string();
 
     let mut args = Vec::new();
@@ -371,77 +522,167 @@ fn build_atom(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>
 
 // -- Control flow building -----------------------------------------------
 
-fn build_if_block(pair: pest::iterators::Pair<Rule>) -> Result<IfBlock, Vec<ParseError>> {
+/// Build an if-block, returning it with the markers that face its siblings.
+///
+/// A block has four trim positions, and they land in different places:
+/// `{#- if` and `endif -#}` face outward and are handed back to the
+/// caller; `if -#}` and `{#- endif` face inward and are applied here.
+///
+/// The inward `{#- endif` marker is applied to the tail of *every* branch,
+/// because any of them may be the one that runs. Trimming a branch that
+/// does not run costs nothing.
+fn build_if_block(pair: pest::iterators::Pair<Rule>) -> Result<(IfBlock, Trim), Vec<ParseError>> {
     let mut inner = pair.into_inner();
 
-    // First child is the condition (from if_open)
-    let condition = build_expr(inner.next().unwrap())?;
+    let open = inner.next().unwrap();
+    let open_trim = Trim::of(&open);
+    let condition = build_expr(content_pairs(open).next().unwrap())?;
 
-    // Collect body nodes until we hit elif_branch, else_branch, or end
-    let mut body_nodes = Vec::new();
-    let mut elif_branches = Vec::new();
-    let mut else_body = None;
+    let mut body_pairs = Vec::new();
+    let mut elif_branches: Vec<(ElifBranch, Trim)> = Vec::new();
+    let mut else_branch: Option<(Template, Trim)> = None;
+    let mut close_trim = Trim::default();
 
     for child in inner {
         match child.as_rule() {
             Rule::elif_branch => {
-                let mut elif_inner = child.into_inner();
+                let trim = Trim::of(&child);
+                let mut elif_inner = content_pairs(child);
                 let elif_condition = build_expr(elif_inner.next().unwrap())?;
-                let mut elif_nodes = Vec::new();
-                for elif_child in elif_inner {
-                    if let Some(node) = build_node(elif_child)? {
-                        elif_nodes.push(node);
-                    }
-                }
-                elif_branches.push(ElifBranch {
-                    condition: elif_condition,
-                    body: Template { nodes: elif_nodes },
-                });
+                let nodes = build_nodes(elif_inner)?;
+                elif_branches.push((
+                    ElifBranch {
+                        condition: elif_condition,
+                        body: Template { nodes },
+                    },
+                    trim,
+                ));
             }
             Rule::else_branch => {
-                let mut else_nodes = Vec::new();
-                for else_child in child.into_inner() {
-                    if let Some(node) = build_node(else_child)? {
-                        else_nodes.push(node);
-                    }
-                }
-                else_body = Some(Template { nodes: else_nodes });
+                let trim = Trim::of(&child);
+                let nodes = build_nodes(content_pairs(child))?;
+                else_branch = Some((Template { nodes }, trim));
             }
-            _ => {
-                if let Some(node) = build_node(child)? {
-                    body_nodes.push(node);
-                }
-            }
+            Rule::if_close => close_trim = Trim::of(&child),
+            _ => body_pairs.push(child),
         }
     }
 
-    Ok(IfBlock {
-        condition,
-        body: Template { nodes: body_nodes },
-        elif_branches,
-        else_body,
-    })
+    let mut body = Template {
+        nodes: build_nodes(body_pairs.into_iter())?,
+    };
+    let mut elifs: Vec<ElifBranch> = Vec::with_capacity(elif_branches.len());
+    let mut branch_trims = vec![open_trim];
+    for (elif, trim) in elif_branches {
+        elifs.push(elif);
+        branch_trims.push(trim);
+    }
+    let mut else_body = None;
+    if let Some((body, trim)) = else_branch {
+        else_body = Some(body);
+        branch_trims.push(trim);
+    }
+
+    // Branches are indexed in source order: 0 is the `if` body, then each
+    // `elif`, then `else`. `branch_trims[i]` is the marker pair on the tag
+    // that OPENS branch i — so its right half trims into branch i, and its
+    // left half trims the tail of the branch before it.
+    for (i, trim) in branch_trims.iter().enumerate() {
+        if trim.right {
+            trim_body_start(branch_mut(&mut body, &mut elifs, &mut else_body, i));
+        }
+        if trim.left && i > 0 {
+            trim_body_end(branch_mut(&mut body, &mut elifs, &mut else_body, i - 1));
+        }
+    }
+
+    // `{#- endif` trims the tail of every branch, since any of them could
+    // be the one that runs. Trimming a branch that doesn't run costs
+    // nothing, and this keeps the result independent of the condition.
+    if close_trim.left {
+        for i in 0..branch_trims.len() {
+            trim_body_end(branch_mut(&mut body, &mut elifs, &mut else_body, i));
+        }
+    }
+
+    Ok((
+        IfBlock {
+            condition,
+            body,
+            elif_branches: elifs,
+            else_body,
+        },
+        Trim {
+            left: open_trim.left,
+            right: close_trim.right,
+        },
+    ))
 }
 
-fn build_foreach_block(pair: pest::iterators::Pair<Rule>) -> Result<ForEachBlock, Vec<ParseError>> {
+/// Index into an if-block's branches in source order: 0 is the `if` body,
+/// then each `elif` in turn, then `else`.
+fn branch_mut<'t>(
+    body: &'t mut Template,
+    elifs: &'t mut [ElifBranch],
+    else_body: &'t mut Option<Template>,
+    index: usize,
+) -> &'t mut Template {
+    if index == 0 {
+        return body;
+    }
+    match elifs.get_mut(index - 1) {
+        Some(elif) => &mut elif.body,
+        // Past the last elif, so this is the else branch. The index comes
+        // from `branch_trims`, which is built to match, so it is in range.
+        None => else_body.as_mut().expect("branch index out of range"),
+    }
+}
+
+fn build_foreach_block(
+    pair: pest::iterators::Pair<Rule>,
+) -> Result<(ForEachBlock, Trim), Vec<ParseError>> {
     let mut inner = pair.into_inner();
 
+    let open = inner.next().unwrap();
+    let open_trim = Trim::of(&open);
     // From foreach_open: identifier (binding) then expr (iterable)
-    let binding = inner.next().unwrap().as_str().to_string();
-    let iterable = build_expr(inner.next().unwrap())?;
+    let mut open_inner = content_pairs(open);
+    let binding = open_inner.next().unwrap().as_str().to_string();
+    let iterable = build_expr(open_inner.next().unwrap())?;
 
-    let mut body_nodes = Vec::new();
+    let mut body_pairs = Vec::new();
+    let mut close_trim = Trim::default();
     for child in inner {
-        if let Some(node) = build_node(child)? {
-            body_nodes.push(node);
+        if child.as_rule() == Rule::foreach_close {
+            close_trim = Trim::of(&child);
+        } else {
+            body_pairs.push(child);
         }
     }
 
-    Ok(ForEachBlock {
-        binding,
-        iterable,
-        body: Template { nodes: body_nodes },
-    })
+    let mut body = Template {
+        nodes: build_nodes(body_pairs.into_iter())?,
+    };
+
+    // Applied once to the body, so it takes effect on every iteration.
+    if open_trim.right {
+        trim_body_start(&mut body);
+    }
+    if close_trim.left {
+        trim_body_end(&mut body);
+    }
+
+    Ok((
+        ForEachBlock {
+            binding,
+            iterable,
+            body,
+        },
+        Trim {
+            left: open_trim.left,
+            right: close_trim.right,
+        },
+    ))
 }
 
 // -- Helpers -------------------------------------------------------------
@@ -554,32 +795,20 @@ fn parse_bin_op(s: &str) -> BinOp {
     }
 }
 
-// ── Standalone block whitespace normalization ───────────────────────────
+// ── Block tag-line whitespace ───────────────────────────────────────────
 //
-// Control flow tags ({# if #}, {# elif #}, {# else #}, {# endif #},
-// {# foreach #}, {# endforeach #}) that appear alone on a line should
-// not produce blank lines in the output. This normalization pass strips
-// the newlines that belong to "tag lines" from the literal text nodes
-// in the AST.
+// The newline that follows an opening or transition tag ({# if #},
+// {# elif #}, {# else #}, {# foreach #}) always belongs to that tag's
+// line, never to the body's content. Likewise the indent before a
+// closing tag on its own line. Both are decidable from the source alone,
+// so they are stripped here.
 //
-// The rules mirror the existing standalone command behavior:
-//
-// 1. A block-level node (IfBlock, ForEach) is "standalone" if:
-//    - The preceding literal ends with \n (+ optional whitespace), OR
-//      the block is the first node.
-//    - The following literal starts with \n, OR the block is the last
-//      node (but not if it's the ONLY node — that's inline).
-//
-// 2. For standalone blocks, we strip:
-//    - Trailing whitespace indent from the preceding literal (same line
-//      as the opening tag, e.g. spaces before {# if #}).
-//    - Leading \n from the following literal (the newline after {# endif #}
-//      or {# endforeach #}).
-//    - Leading \n from each block body's first literal (the newline after
-//      {# if #}, {# elif #}, {# else #}, {# foreach #}).
-//    - Trailing indent from each block body's last literal (the spaces
-//      before {# elif #}, {# else #}, {# endif #}, {# endforeach #} when
-//      those tags are indented on their own line).
+// Whether the *block as a whole* occupies a line of output is NOT
+// decidable here — it depends on what the body rendered, and a block
+// whose branch produces inline content occupies a line differently from
+// one that produces a trailing newline or nothing at all. That decision
+// belongs to the evaluator, which handles blocks through the same
+// `check_standalone` path as expressions and commands.
 
 fn normalize_whitespace(template: &mut Template) {
     // First, unconditionally strip the leading newline from every block
@@ -588,10 +817,6 @@ fn normalize_whitespace(template: &mut Template) {
     for node in &mut template.nodes {
         strip_block_body_newlines(node);
     }
-
-    // Then handle the outer context: for standalone blocks, trim the
-    // surrounding whitespace and the newline after the closing tag.
-    normalize_standalone_blocks(&mut template.nodes);
 
     // Recurse into block bodies
     for node in &mut template.nodes {
@@ -652,82 +877,6 @@ fn strip_body_trailing_indent(template: &mut Template) {
         && ws > 0
     {
         text.truncate(text.len() - ws);
-    }
-}
-
-fn normalize_standalone_blocks(nodes: &mut [Node]) {
-    let len = nodes.len();
-
-    // Process in reverse so trimming earlier nodes doesn't affect later indices
-    for i in (0..len).rev() {
-        let is_block = matches!(&nodes[i].node, NodeKind::IfBlock(_) | NodeKind::ForEach(_));
-        if !is_block {
-            continue;
-        }
-
-        // ── Check preceding context ────────────────────────────────
-        let at_start = i == 0;
-        let (preceding_ok, ws_trim) = if at_start {
-            (true, 0)
-        } else {
-            match &nodes[i - 1].node {
-                NodeKind::Literal(text) => {
-                    if text.is_empty() {
-                        // Empty literal (e.g. from a prior strip) — treat
-                        // like being at the start of a line.
-                        (true, 0)
-                    } else if i == 1 && text.bytes().all(|b| b == b' ' || b == b'\t') {
-                        // Whitespace-only literal with no newline at the
-                        // START of the node list — the residue left after
-                        // strip_block_body_newlines removed the enclosing
-                        // tag line's newline, i.e. exactly this line's
-                        // indent. Treat it as line-start. (At any other
-                        // position a whitespace-only literal is mid-line
-                        // spacing between inline constructs and must not
-                        // count.)
-                        (true, text.len())
-                    } else if let Some(ws) = trailing_ws_after_newline_norm(text) {
-                        (true, ws)
-                    } else {
-                        (false, 0)
-                    }
-                }
-                _ => (false, 0),
-            }
-        };
-
-        if !preceding_ok {
-            continue;
-        }
-
-        // ── Check following context ────────────────────────────────
-        let has_following = i + 1 < nodes.len();
-        let following_ok = if !has_following {
-            true
-        } else {
-            match &nodes[i + 1].node {
-                NodeKind::Literal(text) => text.starts_with('\n') || text.starts_with("\r\n"),
-                _ => false,
-            }
-        };
-
-        if !following_ok {
-            continue;
-        }
-
-        // ── Standalone confirmed — apply trimming ──────────────────
-
-        // 1. Trim trailing whitespace (indent) from preceding literal
-        if ws_trim > 0
-            && let NodeKind::Literal(text) = &mut nodes[i - 1].node
-        {
-            text.truncate(text.len() - ws_trim);
-        }
-
-        // 2. Strip leading newline from following literal
-        if has_following && let NodeKind::Literal(text) = &mut nodes[i + 1].node {
-            strip_leading_newline_mut(text);
-        }
     }
 }
 

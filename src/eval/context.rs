@@ -86,6 +86,29 @@ pub trait EvalContext: Any {
         document_id: &str,
         registry: &Registry,
     ) -> Result<String, EvalError>;
+
+    /// Resolve a document reference and return its [`Value`].
+    ///
+    /// This is the path that lets one entry hand structured data to
+    /// another. A document whose template ends in `{# return [...] #}`
+    /// produces an array here, so the including template can iterate it:
+    ///
+    /// ```text
+    /// // LOOT_TABLE:  {# return ["sword", "shield"] #}
+    /// {# foreach item in [[LOOT_TABLE]] #} - {{item}}
+    /// {# endforeach #}
+    /// ```
+    ///
+    /// Note there is deliberately no trigger counterpart. A trigger marks
+    /// another entry for activation rather than producing content, so it
+    /// has no value to carry.
+    fn resolve_document_value(
+        &mut self,
+        document_id: &str,
+        registry: &Registry,
+    ) -> Result<Value, EvalError> {
+        Ok(Value::String(self.resolve_document(document_id, registry)?))
+    }
 }
 
 /// A minimal [`EvalContext`] implementation for testing and single-file use.

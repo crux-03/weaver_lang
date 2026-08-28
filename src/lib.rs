@@ -77,7 +77,8 @@ pub use ast::template::Template;
 pub use ast::value::{PathError, Value};
 pub use error::{EvalError, EvalErrorKind, ParseError};
 pub use eval::{
-    EvalContext, EvalOptions, SimpleContext, eval_expr_value, evaluate, evaluate_with_options,
+    EvalContext, EvalOptions, SimpleContext, eval_expr_value, evaluate, evaluate_value,
+    evaluate_value_with_options, evaluate_with_options,
 };
 #[cfg(feature = "macros")]
 pub use macros;
@@ -95,6 +96,34 @@ pub fn render(
 ) -> Result<String, RenderError> {
     let template = parser::parse(source).map_err(RenderError::Parse)?;
     evaluate(&template, ctx, registry).map_err(RenderError::Eval)
+}
+
+/// Parse source text and evaluate it, returning its [`Value`].
+///
+/// The value counterpart to [`render`]. A template with no
+/// `{# return expr #}` yields [`Value::String`] holding the rendered
+/// output; one that returns a value yields that value instead.
+///
+/// ```rust
+/// use weaver_lang::{render_value, SimpleContext, Registry, Value};
+///
+/// let mut ctx = SimpleContext::new();
+/// let registry = Registry::new();
+///
+/// let value = render_value(
+///     r#"{# return ["sword", "shield"] #}"#,
+///     &mut ctx,
+///     &registry,
+/// ).unwrap();
+/// assert_eq!(value, Value::Array(vec!["sword".into(), "shield".into()]));
+/// ```
+pub fn render_value(
+    source: &str,
+    ctx: &mut impl EvalContext,
+    registry: &Registry,
+) -> Result<Value, RenderError> {
+    let template = parser::parse(source).map_err(RenderError::Parse)?;
+    evaluate_value(&template, ctx, registry).map_err(RenderError::Eval)
 }
 
 /// Parse source text and evaluate it with custom options.
@@ -183,6 +212,27 @@ impl CompiledTemplate {
         options: EvalOptions,
     ) -> Result<String, EvalError> {
         evaluate_with_options(&self.template, ctx, registry, options)
+    }
+
+    /// Evaluate this template and return its [`Value`].
+    ///
+    /// See [`evaluate_value`] for what the returned value means.
+    pub fn evaluate_value(
+        &self,
+        ctx: &mut impl EvalContext,
+        registry: &Registry,
+    ) -> Result<Value, EvalError> {
+        evaluate_value(&self.template, ctx, registry)
+    }
+
+    /// Evaluate this template with custom options and return its [`Value`].
+    pub fn evaluate_value_with_options(
+        &self,
+        ctx: &mut impl EvalContext,
+        registry: &Registry,
+        options: EvalOptions,
+    ) -> Result<Value, EvalError> {
+        evaluate_value_with_options(&self.template, ctx, registry, options)
     }
 
     /// Access the underlying AST for inspection or analysis.

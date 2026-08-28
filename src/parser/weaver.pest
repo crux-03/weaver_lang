@@ -15,6 +15,7 @@ expr_standalone = { SOI ~ ws ~ expr ~ ws ~ EOI }
 node = _{
     if_block
   | foreach_block
+  | control_stmt
   | expression_node
   | command_node
   | literal_text
@@ -46,14 +47,14 @@ command_node = { command_call }
 // host resolves, or the loop binding. Every segment after it indexes into
 // the resolved value and must find an object along the way.
 
-variable   = { "{{" ~ ws ~ (scoped_var | bare_var) ~ ws ~ "}}" }
+variable   = { "{{" ~ trim_l? ~ ws ~ (scoped_var | bare_var) ~ ws ~ trim_r? ~ "}}" }
 scoped_var = { identifier ~ ":" ~ dotted_name }
 bare_var   = { dotted_name }
 
 // ── Processors: @[namespace.name(key: value, key2: value2)] ─────────────
 
 processor_call = {
-    "@[" ~ ws ~ dotted_name ~ "(" ~ ws ~ property_list? ~ ws ~ ")" ~ ws ~ "]"
+    "@[" ~ trim_l? ~ ws ~ dotted_name ~ "(" ~ ws ~ property_list? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
 }
 
 property_list = { property ~ (ws ~ "," ~ ws ~ property)* }
@@ -63,7 +64,7 @@ property = { identifier ~ ws ~ ":" ~ ws ~ expr }
 // ── Commands: $[name(arg1, arg2)] ───────────────────────────────────────
 
 command_call = {
-    "$[" ~ ws ~ identifier ~ "(" ~ ws ~ arg_list? ~ ws ~ ")" ~ ws ~ "]"
+    "$[" ~ trim_l? ~ ws ~ identifier ~ "(" ~ ws ~ arg_list? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
 }
 
 arg_list = { expr ~ (ws ~ "," ~ ws ~ expr)* }
@@ -103,29 +104,51 @@ document_id = _{
   | identifier
 }
 
+// ── Flow statements: {# break #}, {# continue #}, {# return expr #} ─────
+//
+// These share the control-flow delimiter because that is what they are.
+// `kw_end` prevents a longer identifier from starting a match it cannot
+// finish: without it `{# breakpoint #}` begins matching `break_stmt`,
+// fails at `#}`, and reports an error pointing at the wrong thing.
+
+control_stmt = _{ break_stmt | continue_stmt | return_stmt | stop_stmt }
+
+break_stmt    = { "{#" ~ trim_l? ~ ws ~ "break" ~ kw_end ~ ws ~ trim_r? ~ "#}" }
+continue_stmt = { "{#" ~ trim_l? ~ ws ~ "continue" ~ kw_end ~ ws ~ trim_r? ~ "#}" }
+
+/// `{# return expr #}` makes `expr` the template's value, discarding the
+/// output rendered before it. A bare `{# return #}` is sugar for
+/// `{# return none #}`.
+return_stmt = { "{#" ~ trim_l? ~ ws ~ "return" ~ kw_end ~ (ws ~ expr)? ~ ws ~ trim_r? ~ "#}" }
+
+/// `{# stop #}` ends evaluation and keeps the output rendered so far.
+stop_stmt = { "{#" ~ trim_l? ~ ws ~ "stop" ~ kw_end ~ ws ~ trim_r? ~ "#}" }
+
+kw_end = _{ !(ASCII_ALPHANUMERIC | "_") }
+
 // ── Control flow ────────────────────────────────────────────────────────
 
 if_block = {
     if_open ~ node* ~ elif_branch* ~ else_branch? ~ if_close
 }
 
-if_open  = _{ "{#" ~ ws ~ "if" ~ ws ~ expr ~ ws ~ "#}" }
-if_close = _{ "{#" ~ ws ~ "endif" ~ ws ~ "#}" }
+if_open  = { "{#" ~ trim_l? ~ ws ~ "if" ~ ws ~ expr ~ ws ~ trim_r? ~ "#}" }
+if_close = { "{#" ~ trim_l? ~ ws ~ "endif" ~ ws ~ trim_r? ~ "#}" }
 
 elif_branch = {
-    "{#" ~ ws ~ "elif" ~ ws ~ expr ~ ws ~ "#}" ~ node*
+    "{#" ~ trim_l? ~ ws ~ "elif" ~ ws ~ expr ~ ws ~ trim_r? ~ "#}" ~ node*
 }
 
 else_branch = {
-    "{#" ~ ws ~ "else" ~ ws ~ "#}" ~ node*
+    "{#" ~ trim_l? ~ ws ~ "else" ~ ws ~ trim_r? ~ "#}" ~ node*
 }
 
 foreach_block = {
     foreach_open ~ node* ~ foreach_close
 }
 
-foreach_open  = _{ "{#" ~ ws ~ "foreach" ~ ws ~ identifier ~ ws ~ "in" ~ ws ~ expr ~ ws ~ "#}" }
-foreach_close = _{ "{#" ~ ws ~ "endforeach" ~ ws ~ "#}" }
+foreach_open  = { "{#" ~ trim_l? ~ ws ~ "foreach" ~ ws ~ identifier ~ ws ~ "in" ~ ws ~ expr ~ ws ~ trim_r? ~ "#}" }
+foreach_close = { "{#" ~ trim_l? ~ ws ~ "endforeach" ~ ws ~ trim_r? ~ "#}" }
 
 // ── Expressions ─────────────────────────────────────────────────────────
 // Used inside if conditions, processor values, command args, foreach iterables.
@@ -198,6 +221,21 @@ identifier = @{
 dotted_name = @{
     identifier ~ ("." ~ identifier)*
 }
+
+// ── Trim markers ────────────────────────────────────────────────────────
+//
+// A `-` immediately inside a delimiter eats the whitespace on that side:
+// `{#- if x -#}`, `{{- name -}}`, `$[- cmd() -]`. Left and right are
+// separate rules so a lone marker can be told apart from its position in
+// the pair tree.
+//
+// There is no ambiguity with unary minus or subtraction. `{{-x}}` holds an
+// identifier, never an expression. In `{# if x -#}` pest's `expr` tries to
+// consume `- <atom>`, fails at `#}`, and backtracks the repetition — so
+// `{# if x - 1 -#}` parses as `x - 1` with a trailing marker, as written.
+
+trim_l = { "-" }
+trim_r = { "-" }
 
 // ── Whitespace (explicit, not implicit) ─────────────────────────────────
 // We do NOT use pest's implicit WHITESPACE rule because template-level
