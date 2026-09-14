@@ -72,7 +72,7 @@ pub mod eval;
 mod parser;
 pub mod registry;
 
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 pub use ast::doc::{InputDecl, InputType, ValueDoc};
 pub use ast::expr::PathSegment;
 pub use ast::span::{Span, Spanned};
@@ -83,11 +83,11 @@ pub use eval::{
     EvalContext, EvalOptions, SimpleContext, eval_expr_value, evaluate, evaluate_value,
     evaluate_value_with_options, evaluate_with_options,
 };
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 pub use eval::{evaluate_value_doc, evaluate_value_doc_with_options, expand_value_doc};
 #[cfg(feature = "macros")]
 pub use macros;
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 pub use parser::parse_value_doc;
 pub use parser::{parse, parse_expr};
 pub use registry::{

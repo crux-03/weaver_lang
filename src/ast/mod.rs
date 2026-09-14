@@ -9,7 +9,7 @@
 //!   arguments, and intermediate computation. Expression results are
 //!   coerced to strings only when they appear at the template level.
 
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 pub mod doc;
 pub mod expr;
 pub mod span;
@@ -17,7 +17,7 @@ pub mod template;
 pub mod value;
 
 // Convenience re-exports
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 pub use doc::{InputDecl, InputType, ValueDoc};
 pub use expr::*;
 pub use span::{Span, Spanned};

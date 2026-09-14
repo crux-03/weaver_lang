@@ -94,10 +94,10 @@ pub trait EvalContext: Any {
     /// resolve to a live Character", and only the host can answer that —
     /// the language checks the shape of everything else itself.
     ///
-    /// The default accepts anything, so a host that does not use data mode
+    /// The default accepts anything, so a host that does not use WTN
     /// (or does not need the check) is unaffected. Returning `Err` reports
     /// the failure against the declaration that asked for the value.
-    #[cfg(feature = "data")]
+    #[cfg(feature = "wtn")]
     fn validate_input(&self, _kind: &str, _value: &Value) -> Result<(), EvalError> {
         Ok(())
     }

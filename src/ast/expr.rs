@@ -23,7 +23,7 @@ pub enum ExprKind {
 
     /// A string literal that is itself a text-mode template.
     ///
-    /// Only data mode builds these — in text mode a quoted string is a
+    /// Only WTN builds these — in text mode a quoted string is a
     /// plain [`Literal`](ExprKind::Literal), because the prose around it is
     /// already the template. A raw string (`r"..."`) is always a literal.
     StringTemplate(Template),
@@ -76,7 +76,7 @@ pub enum ExprKind {
 /// One `key: value` pair in an object literal.
 #[derive(Debug, Clone)]
 pub struct ObjectEntry {
-    /// An identifier key is a string literal; a quoted key in data mode is
+    /// An identifier key is a string literal; a quoted key in WTN is
     /// a template, which is how `"{{k}}": v` names a computed key. The
     /// expression must evaluate to a string.
     pub key: Expr,

@@ -19,11 +19,11 @@ use crate::error::{EvalError, EvalErrorKind};
 use crate::registry::{CallArgs, Registry};
 
 mod context;
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 mod doc;
 
 pub use context::{EvalContext, SimpleContext};
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 pub use doc::{evaluate_value_doc, evaluate_value_doc_with_options, expand_value_doc};
 
 /// Evaluate a template against a context and registry, producing the final
@@ -309,10 +309,10 @@ struct Evaluator {
     iteration_count: u64,
     /// Set by a flow statement, cleared by whatever handles it.
     flow: Option<Flow>,
-    /// The bound `input` scope of a data-mode document.
+    /// The bound `input` scope of a WTN document.
     ///
     /// `None` in text mode, where `input` is an ordinary host scope like
-    /// any other. In data mode the evaluator owns it, so a declared default
+    /// any other. In WTN the evaluator owns it, so a declared default
     /// is applied in one place rather than by every host.
     inputs: Option<BTreeMap<String, Value>>,
 }
@@ -329,8 +329,8 @@ impl Evaluator {
         }
     }
 
-    /// Evaluate one expression outside any template, for data mode.
-    #[cfg(feature = "data")]
+    /// Evaluate one expression outside any template, for WTN.
+    #[cfg(feature = "wtn")]
     fn eval_doc_value(
         &mut self,
         expr: &Expr,
@@ -1009,7 +1009,7 @@ impl Evaluator {
                     return self.walk_path(&root, var, span);
                 }
 
-                // In a data-mode document the evaluator owns `input`, so a
+                // In a WTN document the evaluator owns `input`, so a
                 // declared default is not something the host has to know
                 // about. In text mode `inputs` is None and this falls
                 // through to the host like any other scope.

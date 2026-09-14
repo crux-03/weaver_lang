@@ -1,6 +1,6 @@
-//! What data mode does and does not change about text mode.
+//! What WTN does and does not change about text mode.
 //!
-//! Data mode is an entry rule over a shared value grammar, which raises a
+//! WTN is an entry rule over a shared value grammar, which raises a
 //! fair question: how much of it leaks into an ordinary template? These
 //! tests answer it, and they are deliberately *not* gated on the `data`
 //! feature — the guarantee is that text mode behaves identically whether
@@ -13,7 +13,7 @@ fn eval(source: &str) -> String {
     render(source, &mut ctx, &Registry::new()).unwrap()
 }
 
-/// Prose is prose. Nothing data mode added is a construct starter, so
+/// Prose is prose. Nothing WTN added is a construct starter, so
 /// `literal_text` ends at exactly the six delimiters it always did.
 #[test]
 fn text_mode_prose_is_untouched() {
@@ -30,7 +30,7 @@ fn text_mode_prose_is_untouched() {
     }
 }
 
-/// The input block is reachable only from the data-mode entry rule. In a
+/// The input block is reachable only from the WTN entry rule. In a
 /// template it is text — not a declaration, and not an error either.
 #[test]
 fn an_inputs_block_in_a_template_is_just_text() {
@@ -52,7 +52,7 @@ fn an_inputs_block_in_a_template_is_just_text() {
     assert!(out.contains(r#"difficulty: enum("easy", "brutal") = "normal""#));
 }
 
-/// The shared half really is shared: what data mode added to expressions is
+/// The shared half really is shared: what WTN added to expressions is
 /// available inside a template's constructs too. This is the deliberate
 /// half of the boundary, and it is additive — each of these was a parse
 /// error before.
@@ -69,7 +69,7 @@ fn the_expression_additions_are_shared_on_purpose() {
 }
 
 /// A string inside a construct stays a string in text mode. Templating
-/// strings is a property of the data-mode entry point, not of the grammar.
+/// strings is a property of the WTN entry point, not of the grammar.
 #[test]
 fn a_string_in_a_template_is_never_a_template() {
     assert_eq!(eval(r#"{{ "literal {{braces}}" }}"#), "literal {{braces}}");

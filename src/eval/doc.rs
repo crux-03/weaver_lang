@@ -1,4 +1,4 @@
-//! Instantiating a data-mode document.
+//! Instantiating a WTN document.
 //!
 //! Expansion happens once, at instantiation: inputs are bound and checked,
 //! the document is evaluated, and what comes out is a plain [`Value`] the
@@ -13,7 +13,7 @@ use crate::ast::value::Value;
 use crate::error::{EvalError, EvalErrorKind};
 use crate::registry::Registry;
 
-/// Parse and expand a data-mode document in one step.
+/// Parse and expand a WTN document in one step.
 pub fn expand_value_doc(
     source: &str,
     inputs: &BTreeMap<String, Value>,

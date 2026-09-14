@@ -1,13 +1,13 @@
-//! Data-mode documents: a declared set of inputs and one value.
+//! WTN documents: a declared set of inputs and one value.
 //!
-//! A [`ValueDoc`] is what data mode parses. Its inputs are *declared* rather
+//! A [`ValueDoc`] is what WTN parses. Its inputs are *declared* rather
 //! than discovered, so an instantiation form can be generated from the
 //! document instead of authors guessing which fields exist.
 
 use super::expr::Expr;
 use super::span::Span;
 
-/// A parsed data-mode document.
+/// A parsed WTN document.
 #[derive(Debug, Clone)]
 pub struct ValueDoc {
     /// Declarations from the `#inputs` block, in source order. Empty when

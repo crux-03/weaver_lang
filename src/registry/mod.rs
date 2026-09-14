@@ -378,9 +378,9 @@ impl ValueType {
 pub struct Registry {
     commands: HashMap<String, Box<dyn WeaverCommand>>,
     processors: HashMap<String, Box<dyn WeaverProcessor>>,
-    /// Entity kinds a data-mode input may declare a `Ref<...>` to. Held as
+    /// Entity kinds a WTN input may declare a `Ref<...>` to. Held as
     /// a sorted set so an editor frontend gets a stable listing.
-    #[cfg(feature = "data")]
+    #[cfg(feature = "wtn")]
     kinds: std::collections::BTreeSet<String>,
 }
 
@@ -389,7 +389,7 @@ impl Registry {
         Self {
             commands: HashMap::new(),
             processors: HashMap::new(),
-            #[cfg(feature = "data")]
+            #[cfg(feature = "wtn")]
             kinds: std::collections::BTreeSet::new(),
         }
     }
@@ -402,18 +402,18 @@ impl Registry {
     /// registry.register_kind("Character");
     /// assert!(registry.has_kind("Character"));
     /// ```
-    #[cfg(feature = "data")]
+    #[cfg(feature = "wtn")]
     pub fn register_kind(&mut self, kind: impl Into<String>) {
         self.kinds.insert(kind.into());
     }
 
-    #[cfg(feature = "data")]
+    #[cfg(feature = "wtn")]
     pub fn has_kind(&self, kind: &str) -> bool {
         self.kinds.contains(kind)
     }
 
     /// Every registered kind, sorted.
-    #[cfg(feature = "data")]
+    #[cfg(feature = "wtn")]
     pub fn kinds(&self) -> impl Iterator<Item = &str> {
         self.kinds.iter().map(String::as_str)
     }

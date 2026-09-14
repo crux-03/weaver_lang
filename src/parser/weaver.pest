@@ -14,7 +14,7 @@
 template        = { SOI ~ node* ~ EOI }
 expr_standalone = { SOI ~ ws ~ expr ~ ws ~ EOI }
 
-// ── Data mode ───────────────────────────────────────────────────────────
+// ── Weaver Template Notation ────────────────────────────────────────────
 //
 // A second entry rule, not a second language: a document is one value with
 // holes rather than prose with holes. Everything below it — expressions,
@@ -314,7 +314,7 @@ object_else    = { else_tag ~ ws ~ object_items? ~ ws }
 
 object_entry   = { object_key ~ ws ~ ":" ~ ws ~ expr }
 
-/// A key is an identifier or a string. In data mode a string is a template,
+/// A key is an identifier or a string. In WTN a string is a template,
 /// which is what makes `"{{k}}": v` a computed key — no separate syntax.
 object_key     = _{ identifier | quoted_string }
 

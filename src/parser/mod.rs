@@ -9,7 +9,7 @@
 use pest::Parser;
 use pest_derive::Parser;
 
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 use crate::ast::doc::{InputDecl, InputType, ValueDoc};
 use crate::ast::expr::*;
 use crate::ast::span::{Span, Spanned};
@@ -123,7 +123,7 @@ pub fn parse_expr(source: &str) -> Result<Expr, Vec<ParseError>> {
     build_expr(pair, Strings::Literal)
 }
 
-/// Parse a data-mode document: declared inputs, then one value.
+/// Parse a WTN document: declared inputs, then one value.
 ///
 /// The difference from [`parse`] is the entry rule, not the language. A
 /// document is a value with holes rather than prose with holes; below that
@@ -144,7 +144,7 @@ pub fn parse_expr(source: &str) -> Result<Expr, Vec<ParseError>> {
 /// "#).unwrap();
 /// assert_eq!(doc.inputs.len(), 1);
 /// ```
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 pub fn parse_value_doc(source: &str) -> Result<ValueDoc, Vec<ParseError>> {
     let pairs = WeaverParser::parse(Rule::value_doc, source).map_err(|e| {
         vec![ParseError::new(
@@ -171,7 +171,7 @@ pub fn parse_value_doc(source: &str) -> Result<ValueDoc, Vec<ParseError>> {
     })
 }
 
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 fn build_inputs_block(
     pair: pest::iterators::Pair<Rule>,
 ) -> Result<Vec<InputDecl>, Vec<ParseError>> {
@@ -215,7 +215,7 @@ fn build_inputs_block(
     }
 }
 
-#[cfg(feature = "data")]
+#[cfg(feature = "wtn")]
 fn build_input_type(pair: pest::iterators::Pair<Rule>) -> Result<InputType, Vec<ParseError>> {
     let span = pair_span(&pair);
     match pair.as_rule() {
@@ -267,7 +267,7 @@ fn pair_span(pair: &pest::iterators::Pair<Rule>) -> Span {
 ///
 /// This is the one place the two modes differ below the entry rule. In data
 /// mode a string is a text-mode template (`prompt: "You are {{c.name}}"`),
-/// so structure comes from data mode and prose from text mode, and an agent
+/// so structure comes from WTN and prose from text mode, and an agent
 /// system prompt stops being a special case. In text mode the prose around
 /// the construct is already the template, so a string inside `$[...]` is
 /// just a string.
@@ -276,8 +276,8 @@ fn pair_span(pair: &pest::iterators::Pair<Rule>) -> Span {
 /// holds is parsed in text mode, so a string inside that is a plain literal
 /// again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// `Template` is only ever constructed by the data-mode entry point.
-#[cfg_attr(not(feature = "data"), allow(dead_code))]
+// `Template` is only ever constructed by the WTN entry point.
+#[cfg_attr(not(feature = "wtn"), allow(dead_code))]
 enum Strings {
     Literal,
     Template,
@@ -817,7 +817,7 @@ fn build_atom(
             Ok(Spanned::new(ExprKind::ObjectLiteral(items), span))
         }
         Rule::raw_string => {
-            // `r"..."` — no escapes, and no template even in data mode.
+            // `r"..."` — no escapes, and no template even in WTN.
             let inner = pair
                 .into_inner()
                 .find(|p| p.as_rule() == Rule::raw_inner)

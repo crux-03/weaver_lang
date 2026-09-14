@@ -1,4 +1,4 @@
-//! Data mode: a document that is one value with holes.
+//! Weaver Template Notation: a document that is one value with holes.
 //!
 //! The premise is that this is not a second language. Below the entry rule
 //! it is the same expressions, the same literals and the same loops text
@@ -6,7 +6,7 @@
 //! different: what a document is, what a string means inside one, and what
 //! `#inputs` buys.
 
-#![cfg(feature = "data")]
+#![cfg(feature = "wtn")]
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -571,7 +571,7 @@ fn in_text_mode_input_is_an_ordinary_host_scope() {
 
 #[test]
 fn the_value_grammar_is_the_same_one_text_mode_uses() {
-    // Loops in item position, comments and raw strings are not data-mode
+    // Loops in item position, comments and raw strings are not WTN-only
     // features bolted on above text mode — they are the shared grammar.
     let mut ctx = SimpleContext::new();
     let out = weaver_lang::render(
