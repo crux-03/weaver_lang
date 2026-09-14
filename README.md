@@ -63,6 +63,7 @@ assert_eq!(template.evaluate(&mut ctx, &registry).unwrap(), "HP: 42");
 | foreach    | `{# foreach foo in bar #} - {{foo}} {# endforeach #}` |
 | flow       | `{# break #}`, `{# continue #}`, `{# return expr #}`, `{# stop #}` |
 | trim       | `{#- ... -#}`, `{{- ... -}}`, `$[- ... -]`            |
+| comments   | `// to end of line`                                   |
 
 ### Variables
 
@@ -406,6 +407,18 @@ Expressions appear in conditions, arguments, literals, and inside `{{ }}`. Types
 
 This is what lets a newline separate elements. Without it `[1` / `-2]` on two lines would be the single element `-1` rather than the two elements written.
 
+**Comments.** `//` runs to the end of the line, anywhere whitespace is allowed between tokens. A comment ends the line for the operator rule too, so it can never glue two items together.
+
+**Raw strings.** `r"..."` is a string with no escape sequences — and, in [data mode](#data-mode), no template parsing. Use `r#"..."#` when the text contains a quote.
+
+**Loops in a literal.** `{# foreach #}` and `{# if #}` may stand where an element or an entry would:
+
+```
+[{# foreach n in [1, 2, 3] #} n * 10 {# endforeach #}]   → [10, 20, 30]
+```
+
+An array item is an element and an object item is an entry; putting one where the other belongs is a parse error rather than a surprise at evaluation time.
+
 **Separators.** Inside arrays, objects, argument lists and property lists, elements are separated by a comma, a newline, or both, and a trailing separator is allowed:
 
 ```
@@ -417,6 +430,186 @@ This is what lets a newline separate elements. Without it `[1` / `-2]` on two li
   ]
 }
 ```
+
+## Data mode
+
+Realms are expensive to author by hand. A template lets one well-built realm be reinstantiated with new inputs instead of editing every agent by hand — which needs a document that is **structured** rather than textual.
+
+Data mode is a second entry rule, not a second language. Text mode treats a document as prose with holes; data mode treats it as a value with holes. Below the entry rule it is the same expressions, the same literals, the same loops, the same `EvalContext`, `Registry` and `EvalOptions`.
+
+Enable the `data` feature:
+
+```toml
+weaver_lang = { version = "0.7", features = ["data"] }
+```
+
+```rust
+use std::collections::BTreeMap;
+use weaver_lang::{Registry, SimpleContext, expand_value_doc};
+
+let mut ctx = SimpleContext::new();
+let value = expand_value_doc(
+    r#"{ name: "Rags to Riches", rounds: 2 + 1 }"#,
+    &BTreeMap::new(),
+    &mut ctx,
+    &Registry::new(),
+).unwrap();
+assert_eq!(value.to_json(), r#"{"name":"Rags to Riches","rounds":3}"#);
+```
+
+Expansion produces a `Value`. Deserializing that into your own type with `serde` is the structural check — the language deliberately does not build a second type system to describe types Rust already describes.
+
+Use `parse_value_doc` and `evaluate_value_doc` when you want to parse once and instantiate many times; `expand_value_doc` does both.
+
+### A JSON superset
+
+Existing JSON parses as written — including `null`, exponents (`1e5`), and JSON's full escape set (`\/`, `\b`, `\f`, `\uXXXX` with surrogate pairs). `null` is an alias for `none`. There is no migration step: a character file becomes a template the moment someone wants a loop in it.
+
+On top of JSON: unquoted identifier keys, comma-*or*-newline separators, trailing separators, comments, expressions, and the three things below.
+
+### Loops and conditionals in value position
+
+```
+{
+  agents: [
+    {# foreach c in {{input:characters}} #}
+    { character: c, prompt: "You are {{c}}." }
+    {# endforeach #}
+  ]
+  stats: {
+    {# foreach k in {{input:tracked}} #}
+    "{{k}}": 0
+    {# endforeach #}
+  }
+}
+```
+
+A loop body yields **elements** in array context and **entries** in object context. The two have separate grammar rules, so a mismatch is a parse error rather than something that surfaces as a strange value later. `{# if #}`/`{# elif #}`/`{# else #}` work the same way and are how you filter — `{# break #}` and `{# continue #}` are not valid here.
+
+### Strings nest text mode
+
+A string literal in a data document is itself a text-mode template. Structure comes from data mode, prose from text mode, and an agent system prompt stops being a special case:
+
+```
+prompt: "You are {{c.name}}, {{c.role}}."
+```
+
+The corollary is that quoting decides the type: `"{{c.hp}}"` is the string `"10"` and `{{c.hp}}` is the number `10`.
+
+Object keys are strings, so a computed key needs no syntax of its own — `"{{k}}"` is how a loop in object position names its entries. A key produced twice is an error, exactly like a duplicate written by hand.
+
+For a string that should *not* be a template — a prompt containing `{{placeholder}}` meant for some other tool — use a raw string:
+
+```
+literal: r"Answer using {{placeholder}}."
+quoted:  r#"Say "hello" using {{x}}."#
+```
+
+### Enum variants
+
+`Custom([...])` is sugar for serde's externally tagged form. One value is carried directly, several as a list:
+
+```
+scheduler: Custom([{agent: "alice", turns: 2}])   → {"scheduler": {"Custom": [...]}}
+span: Range(1, 10)                                → {"span": {"Range": [1, 10]}}
+mode: "RoundRobin"                                → a unit variant is its string
+```
+
+The parenthesis must be glued to the name, so a reference on one line and a parenthesised expression on the next stay two items.
+
+### Declared inputs
+
+```
+#inputs
+characters: [Ref<Character>]
+difficulty: enum("easy", "normal", "brutal") = "normal"
+rounds: number = 3
+
+{ ... }
+```
+
+Inputs are **declared and typed**, so a UI can generate the instantiation form instead of making authors guess which fields exist. Read them off a parsed document with `doc.inputs`.
+
+The vocabulary is small and closed — `string`, `number`, `bool`, `enum(...)`, `[T]`, and `Ref<Kind>` — because that closure is what makes the form generable: `[Ref<Character>]` renders as a character multi-picker, `enum(...)` as a dropdown.
+
+An input with no `=` is required. Defaults are ordinary expressions, applied by the evaluator rather than by every host.
+
+Declared inputs are reachable as the `input` scope:
+
+```
+{{input:difficulty}}
+{{input:characters[0]}}
+{# foreach c in {{input:characters}} #}
+```
+
+In data mode the evaluator owns that scope. In text mode `input` is an ordinary host scope like any other.
+
+### Kinds and validation
+
+`Ref<Character>` means "a Snowflake that must resolve to a live Character". The set of kinds comes from a host-populated registry, the same way processors and commands do, and whether a given id resolves is a host callback:
+
+```rust
+use weaver_lang::{EvalContext, EvalError, Registry, Value};
+
+// On your EvalContext:
+fn validate_input(&self, kind: &str, value: &Value) -> Result<(), EvalError> {
+    // Ok(())  — the id names a live entity of this kind.
+    // Err(_)  — reported against the declaration that asked for the value.
+    todo!()
+}
+
+// Wherever you build the registry:
+let mut registry = Registry::new();
+registry.register_kind("Character");
+```
+
+The language checks the shapes it named — string, number, bool, enum membership, list-of — and hands `Ref<Kind>` to the host, which is the only party that can answer it. Everything is checked before expansion begins, and every failure is reported against the declaration that asked for the value.
+
+### Refs, not snapshots
+
+A bare `c` in value position serializes to whatever the host put in the array — the Snowflake, not a copy of the character. Expanded realms therefore *reference* characters, and editing a character propagates to every instance. Snapshotting is explicit and visible in the template:
+
+```
+agents: [
+  {# foreach c in {{input:characters}} #}
+  { character: c,                          // stores the id
+    card: @[character.summary(of: c)] }    // embeds a summary
+  {# endforeach #}
+]
+```
+
+Each projection is a registered processor returning a `Value::Object`. The summary type exists in Rust and nowhere in the grammar.
+
+### Instantiation
+
+Expand once, at instantiation. A template produces a concrete document that is then ordinary data, so debugging a broken instance means reading real data rather than re-running an expansion.
+
+### What the feature gates
+
+pest compiles one grammar file, so the `data` feature cannot remove rules from it. What separates the modes is the **entry rule**, and it separates them completely for everything data-mode-specific:
+
+**Reachable only from the data-mode entry rule.** `#inputs`, the type vocabulary, and strings-as-templates. None of these exist in a template, with the feature on or off. An `#inputs` block written in a text-mode entry is ordinary literal text — not a declaration, and not an error:
+
+```
+#inputs                              renders as
+characters: [Ref<Character>]    →    those three lines, verbatim
+```
+
+`#` is not a construct starter, and the additions below are not either, so `literal_text` still ends at exactly the six delimiters it always did. **Prose in a template is byte-for-byte unaffected.**
+
+**Shared, by design.** Enum variants, raw strings, `//` comments, loops in literals, `null`, exponents and JSON's escape set are part of the value grammar, which both modes use. They are reachable in a template, but only *inside* a construct — `{{ }}`, `{# #}`, `@[ ]`, `$[ ]` — never in prose:
+
+```
+{{ Custom(1) }}                                     → {"Custom":1}
+{{ [{# foreach n in [1, 2] #} n * 10 {# endforeach #}] }}   → 10, 20
+Custom(1) in prose                                  → Custom(1) in prose
+```
+
+This is the point of one grammar rather than two: a literal means the same thing everywhere, and there is no second dialect to drift. Each of these was a parse error before, so nothing that used to parse changed meaning.
+
+The one exception is `null`, which joins `true`, `false` and `none` as a word that cannot be read as a reference. `{{null}}` is the none literal, so a loop binding by that name is unreadable.
+
+`tests/mode_boundary.rs` pins all of this down, and is not gated on the feature — the guarantee is that text mode behaves identically either way.
 
 ## Registering processors and commands
 
@@ -656,14 +849,32 @@ let err = EvalError::host_error("failed to load entry").with_source(io_err);
 
 ## Known limitations
 
+### The language
+
+These hold in both modes. The value grammar is shared, so a literal means the same thing inside `$[cmd(...)]` as it does in a data document.
+
 - All numbers are `f64`. Large integers above 2^53 lose precision.
-- No assignment syntax in the language. Variable mutation goes through commands which hosts need to define.
-- Trim markers are all-or-nothing: `-` removes every whitespace character on its side, so it cannot collapse a run of blank lines to exactly one newline. This is shared with Jinja and Liquid.
-- Document evaluation depends on the host's `resolve_document` implementation.
+- No assignment syntax. Variable mutation goes through commands the host defines.
+- A bare reference (`{{n}}`) reads loop bindings only, never the host's `local` scope. Write `{{local:n}}` for that.
 - Objects do not iterate and do not compare equal with `==`. `foreach` still requires an array.
 - Slicing (`items[1:3]`) is not supported. A subscript selects one element.
-- Control flow cannot appear *inside* a literal: `[{# foreach ... #}...{# endforeach #}]` does not parse. Building a collection from a loop is the job of the planned data mode.
-- A bare reference (`{{n}}`) reads loop bindings only, never the host's `local` scope. Write `{{local:n}}` for that.
+- `{# break #}` and `{# continue #}` are not valid in item position, in either mode. Filter with `{# if ... #}` instead.
+- Enum sugar covers newtype and tuple variants (`Custom(x)`, `Range(1, 10)`). A struct variant is written as the object serde reads it from: `{Custom: {a: 1}}`.
+- Comments are `//` to end of line. There is no block comment form.
+- Document evaluation depends on the host's `resolve_document` implementation.
+
+### Text mode
+
+- Trim markers are all-or-nothing: `-` removes every whitespace character on its side, so it cannot collapse a run of blank lines to exactly one newline. This is shared with Jinja and Liquid. In item position — inside a literal, in either mode — there is no surrounding text to trim, so a marker written there parses and does nothing.
+- `#inputs` is a data-mode construct. In a template it is ordinary literal text, not a declaration and not an error.
+
+### Data mode (`data` feature)
+
+- **Every construct starter is live inside a string.** A string literal is a text-mode template, so `{{`, `[[`, `@[`, `$[` and `<trigger` are all interpreted — including in JSON that predates the template. A prompt containing `{{placeholder}}` meant for another tool, or a `[[wiki link]]`, will be evaluated and most likely error. Use `r"..."` for any string that should be taken literally.
+- One `#inputs` block, at the top of the document. There is no way to share or import a set of declarations across documents.
+- The `input` scope belongs to the evaluator here and to the host in text mode. The same reference resolves differently depending on which entry point parsed the document.
+- Expansion produces a `Value` and stops. Nothing checks that it matches the Rust type you are about to deserialize into — that is `serde`'s job, deliberately.
+- The `data` feature gates the API, the AST and evaluation, but not the grammar file — see [What the feature gates](#what-the-feature-gates) for exactly where the line falls.
 
 ## Dependencies
 

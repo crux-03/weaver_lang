@@ -9,6 +9,8 @@
 use pest::Parser;
 use pest_derive::Parser;
 
+#[cfg(feature = "data")]
+use crate::ast::doc::{InputDecl, InputType, ValueDoc};
 use crate::ast::expr::*;
 use crate::ast::span::{Span, Spanned};
 use crate::ast::template::*;
@@ -118,7 +120,135 @@ pub fn parse_expr(source: &str) -> Result<Expr, Vec<ParseError>> {
         )]
     })?;
     let pair = pairs.into_iter().next().unwrap();
-    build_expr(pair)
+    build_expr(pair, Strings::Literal)
+}
+
+/// Parse a data-mode document: declared inputs, then one value.
+///
+/// The difference from [`parse`] is the entry rule, not the language. A
+/// document is a value with holes rather than prose with holes; below that
+/// it is the same expressions, the same literals, the same loops.
+///
+/// String literals inside a data document are themselves text-mode
+/// templates, so prose keeps its own syntax where prose belongs. `r"..."`
+/// opts a string out.
+///
+/// ```rust
+/// use weaver_lang::parse_value_doc;
+///
+/// let doc = parse_value_doc(r#"
+/// #inputs
+/// difficulty: enum("easy", "normal") = "normal"
+///
+/// { mode: {{input:difficulty}} }
+/// "#).unwrap();
+/// assert_eq!(doc.inputs.len(), 1);
+/// ```
+#[cfg(feature = "data")]
+pub fn parse_value_doc(source: &str) -> Result<ValueDoc, Vec<ParseError>> {
+    let pairs = WeaverParser::parse(Rule::value_doc, source).map_err(|e| {
+        vec![ParseError::new(
+            pest_span_to_span(&e),
+            format!("parse error: {e}"),
+        )]
+    })?;
+
+    let doc = pairs.into_iter().next().unwrap();
+    let mut inputs = Vec::new();
+    let mut value = None;
+
+    for pair in doc.into_inner() {
+        match pair.as_rule() {
+            Rule::inputs_block => inputs = build_inputs_block(pair)?,
+            Rule::expr => value = Some(build_expr(pair, Strings::Template)?),
+            _ => {}
+        }
+    }
+
+    Ok(ValueDoc {
+        inputs,
+        value: value.expect("value_doc always carries an expr"),
+    })
+}
+
+#[cfg(feature = "data")]
+fn build_inputs_block(
+    pair: pest::iterators::Pair<Rule>,
+) -> Result<Vec<InputDecl>, Vec<ParseError>> {
+    let mut decls: Vec<InputDecl> = Vec::new();
+    let mut errors = Vec::new();
+
+    for decl_pair in pair.into_inner() {
+        if decl_pair.as_rule() != Rule::input_decl {
+            continue;
+        }
+        let span = pair_span(&decl_pair);
+        let mut parts = decl_pair.into_inner();
+        let name = parts.next().unwrap().as_str().to_string();
+        let ty = build_input_type(parts.next().unwrap())?;
+        // A default is an ordinary expression, evaluated at instantiation
+        // when no value was supplied.
+        let default = match parts.next() {
+            Some(expr) => Some(build_expr(expr, Strings::Template)?),
+            None => None,
+        };
+
+        if decls.iter().any(|d| d.name == name) {
+            errors.push(
+                ParseError::new(span, format!("duplicate input: {name}"))
+                    .with_hint("each input may be declared only once"),
+            );
+            continue;
+        }
+        decls.push(InputDecl {
+            name,
+            ty,
+            default,
+            span,
+        });
+    }
+
+    if errors.is_empty() {
+        Ok(decls)
+    } else {
+        Err(errors)
+    }
+}
+
+#[cfg(feature = "data")]
+fn build_input_type(pair: pest::iterators::Pair<Rule>) -> Result<InputType, Vec<ParseError>> {
+    let span = pair_span(&pair);
+    match pair.as_rule() {
+        Rule::prim_type => Ok(match pair.as_str() {
+            "string" => InputType::String,
+            "number" => InputType::Number,
+            _ => InputType::Bool,
+        }),
+        Rule::list_type => Ok(InputType::List(Box::new(build_input_type(
+            pair.into_inner().next().unwrap(),
+        )?))),
+        Rule::ref_type => Ok(InputType::Ref(
+            pair.into_inner().next().unwrap().as_str().to_string(),
+        )),
+        Rule::enum_type => {
+            let variants = pair
+                .into_inner()
+                .filter(|p| p.as_rule() == Rule::quoted_string)
+                .map(|p| extract_string_content(p))
+                .collect::<Vec<_>>();
+            if variants.is_empty() {
+                return Err(vec![
+                    ParseError::new(span, "enum must list at least one value")
+                        .with_hint(r#"for example: enum("easy", "normal")"#),
+                ]);
+            }
+            Ok(InputType::Enum(variants))
+        }
+        other => Err(vec![ParseError::new(
+            span,
+            format!("unexpected rule in type position: {other:?}"),
+        )]),
+    }
 }
 
 fn pest_span_to_span(e: &pest::error::Error<Rule>) -> Span {
@@ -131,6 +261,26 @@ fn pest_span_to_span(e: &pest::error::Error<Rule>) -> Span {
 fn pair_span(pair: &pest::iterators::Pair<Rule>) -> Span {
     let s = pair.as_span();
     Span::new(s.start(), s.end())
+}
+
+/// Whether a quoted string literal is a value or a template.
+///
+/// This is the one place the two modes differ below the entry rule. In data
+/// mode a string is a text-mode template (`prompt: "You are {{c.name}}"`),
+/// so structure comes from data mode and prose from text mode, and an agent
+/// system prompt stops being a special case. In text mode the prose around
+/// the construct is already the template, so a string inside `$[...]` is
+/// just a string.
+///
+/// The flag does not survive descending *into* a string: the template it
+/// holds is parsed in text mode, so a string inside that is a plain literal
+/// again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `Template` is only ever constructed by the data-mode entry point.
+#[cfg_attr(not(feature = "data"), allow(dead_code))]
+enum Strings {
+    Literal,
+    Template,
 }
 
 // -- Trim markers --------------------------------------------------------
@@ -254,17 +404,17 @@ fn build_node(pair: pest::iterators::Pair<Rule>) -> Result<Option<(Node, Trim)>,
             let text = pair.as_str().to_string();
             NodeKind::Literal(text)
         }
-        Rule::interpolation => NodeKind::Expression(build_interpolation(pair)?),
-        Rule::processor_call => NodeKind::Expression(build_processor_call(pair)?),
+        Rule::interpolation => NodeKind::Expression(build_interpolation(pair, Strings::Literal)?),
+        Rule::processor_call => NodeKind::Expression(build_processor_call(pair, Strings::Literal)?),
         Rule::command_node => {
             // command_node wraps a command_call, which carries the markers.
             let inner = pair.into_inner().next().unwrap();
             let trim = Trim::of(&inner);
-            let cmd = build_command_call(inner)?;
+            let cmd = build_command_call(inner, Strings::Literal)?;
             return Ok(Some((Spanned::new(NodeKind::Command(cmd), span), trim)));
         }
-        Rule::trigger => NodeKind::Expression(build_trigger(pair)?),
-        Rule::document_ref => NodeKind::Expression(build_document_ref(pair)?),
+        Rule::trigger => NodeKind::Expression(build_trigger(pair, Strings::Literal)?),
+        Rule::document_ref => NodeKind::Expression(build_document_ref(pair, Strings::Literal)?),
         Rule::if_block => {
             let (block, trim) = build_if_block(pair)?;
             return Ok(Some((Spanned::new(NodeKind::IfBlock(block), span), trim)));
@@ -279,7 +429,7 @@ fn build_node(pair: pest::iterators::Pair<Rule>) -> Result<Option<(Node, Trim)>,
         Rule::return_stmt => {
             // The inner `expr` is present only for `{# return expr #}`.
             let value = match content_pairs(pair).next() {
-                Some(inner) => Some(build_expr(inner)?),
+                Some(inner) => Some(build_expr(inner, Strings::Literal)?),
                 None => None,
             };
             NodeKind::Return(value)
@@ -296,9 +446,12 @@ fn build_node(pair: pest::iterators::Pair<Rule>) -> Result<Option<(Node, Trim)>,
 ///
 /// The interpolation contributes nothing but its delimiters — the node's
 /// own span already covers them — so only the inner expression survives.
-fn build_interpolation(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
+fn build_interpolation(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<ExprKind, Vec<ParseError>> {
     let inner = content_pairs(pair).next().unwrap();
-    Ok(build_expr(inner)?.node)
+    Ok(build_expr(inner, strings)?.node)
 }
 
 fn build_reference(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
@@ -326,7 +479,10 @@ fn build_reference(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<Pa
     }
 }
 
-fn build_processor_call(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
+fn build_processor_call(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<ExprKind, Vec<ParseError>> {
     let mut inner = content_pairs(pair);
     let dotted = inner.next().unwrap().as_str().to_string();
     let (namespace, name) = split_dotted_name(&dotted);
@@ -339,7 +495,7 @@ fn build_processor_call(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, V
             if prop_pair.as_rule() == Rule::property {
                 let mut prop_inner = prop_pair.into_inner();
                 let key = prop_inner.next().unwrap().as_str().to_string();
-                let value_expr = build_expr(prop_inner.next().unwrap())?;
+                let value_expr = build_expr(prop_inner.next().unwrap(), strings)?;
                 properties.push(ProcessorProperty {
                     key,
                     value: value_expr,
@@ -355,7 +511,10 @@ fn build_processor_call(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, V
     }))
 }
 
-fn build_command_call(pair: pest::iterators::Pair<Rule>) -> Result<CommandCall, Vec<ParseError>> {
+fn build_command_call(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<CommandCall, Vec<ParseError>> {
     let mut inner = content_pairs(pair);
     let name = inner.next().unwrap().as_str().to_string();
 
@@ -365,7 +524,7 @@ fn build_command_call(pair: pest::iterators::Pair<Rule>) -> Result<CommandCall, 
     {
         for arg_pair in arg_list.into_inner() {
             if arg_pair.as_rule() == Rule::expr {
-                args.push(build_expr(arg_pair)?);
+                args.push(build_expr(arg_pair, strings)?);
             }
         }
     }
@@ -373,17 +532,23 @@ fn build_command_call(pair: pest::iterators::Pair<Rule>) -> Result<CommandCall, 
     Ok(CommandCall { name, args })
 }
 
-fn build_trigger(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
+fn build_trigger(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<ExprKind, Vec<ParseError>> {
     let inner = pair.into_inner().next().unwrap();
-    let entry_id = build_id_expr(inner)?;
+    let entry_id = build_id_expr(inner, strings)?;
     Ok(ExprKind::Trigger(TriggerRef {
         entry_id: Box::new(entry_id),
     }))
 }
 
-fn build_document_ref(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
+fn build_document_ref(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<ExprKind, Vec<ParseError>> {
     let inner = pair.into_inner().next().unwrap();
-    let document_id = build_id_expr(inner)?;
+    let document_id = build_id_expr(inner, strings)?;
     Ok(ExprKind::Document(DocumentRef {
         document_id: Box::new(document_id),
     }))
@@ -395,27 +560,33 @@ fn build_document_ref(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec
 /// literal so the id is uniformly an `Expr`. The `expr` form (from the
 /// parenthesized escape hatch) recurses through the operator parser;
 /// everything else is a single atom.
-fn build_id_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>> {
+fn build_id_expr(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<Expr, Vec<ParseError>> {
     let span = pair_span(&pair);
     match pair.as_rule() {
         Rule::identifier => Ok(Spanned::new(
             ExprKind::Literal(Value::String(pair.as_str().to_string())),
             span,
         )),
-        Rule::expr => build_expr(pair),
-        _ => build_atom(pair),
+        Rule::expr => build_expr(pair, strings),
+        _ => build_atom(pair, strings),
     }
 }
 
 // -- Expression parser (handles operators) -------------------------------
 
-fn build_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>> {
+fn build_expr(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<Expr, Vec<ParseError>> {
     let _span = pair_span(&pair);
     let mut inner = pair.into_inner().peekable();
 
     // Parse first unary_expr
     let first = inner.next().unwrap();
-    let mut left = build_unary_expr(first)?;
+    let mut left = build_unary_expr(first, strings)?;
 
     // Parse (bin_op ~ unary_expr)* pairs
     let mut ops: Vec<(BinOp, Expr)> = Vec::new();
@@ -424,7 +595,7 @@ fn build_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>
         let op_pair = inner.next().unwrap();
         let op = parse_bin_op(op_pair.as_str());
         let right_pair = inner.next().unwrap();
-        let right = build_unary_expr(right_pair)?;
+        let right = build_unary_expr(right_pair, strings)?;
         ops.push((op, right));
     }
 
@@ -439,7 +610,10 @@ fn build_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>
     Ok(left)
 }
 
-fn build_unary_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>> {
+fn build_unary_expr(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<Expr, Vec<ParseError>> {
     let span = pair_span(&pair);
     let mut inner = pair.into_inner();
 
@@ -451,7 +625,7 @@ fn build_unary_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<Parse
             "-" => UnaryOp::Neg,
             _ => unreachable!(),
         };
-        let operand = build_postfix_expr(inner.next().unwrap())?;
+        let operand = build_postfix_expr(inner.next().unwrap(), strings)?;
         Ok(Spanned::new(
             ExprKind::UnaryOp {
                 op,
@@ -460,7 +634,7 @@ fn build_unary_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<Parse
             span,
         ))
     } else {
-        build_postfix_expr(first)
+        build_postfix_expr(first, strings)
     }
 }
 
@@ -471,14 +645,17 @@ fn build_unary_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<Parse
 /// and keeps the resolution and lenient-mode behaviour of `{{c.stats.hp}}`.
 /// Anything else — a computed index, a suffix on a call — becomes an
 /// [`ExprKind::Index`] evaluated against whatever the base produced.
-fn build_postfix_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>> {
+fn build_postfix_expr(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<Expr, Vec<ParseError>> {
     if pair.as_rule() != Rule::postfix_expr {
-        return build_atom(pair);
+        return build_atom(pair, strings);
     }
 
     let start = pair_span(&pair).start;
     let mut inner = pair.into_inner();
-    let mut expr = build_atom(inner.next().unwrap())?;
+    let mut expr = build_atom(inner.next().unwrap(), strings)?;
 
     for suffix in inner {
         let span = Span::new(start, pair_span(&suffix).end);
@@ -487,7 +664,7 @@ fn build_postfix_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<Par
                 let name = suffix.into_inner().next().unwrap().as_str().to_string();
                 Spanned::new(ExprKind::Literal(Value::String(name)), span)
             }
-            Rule::index_suffix => build_expr(suffix.into_inner().next().unwrap())?,
+            Rule::index_suffix => build_expr(suffix.into_inner().next().unwrap(), strings)?,
             _ => unreachable!(),
         };
         expr = apply_index(expr, index, span);
@@ -531,7 +708,10 @@ fn constant_segment(literal: &Value) -> Option<PathSegment> {
     }
 }
 
-fn build_atom(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>> {
+fn build_atom(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<Expr, Vec<ParseError>> {
     let span = pair_span(&pair);
     let rule = pair.as_rule();
 
@@ -539,12 +719,12 @@ fn build_atom(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>
         Rule::atom => {
             // atom wraps the actual content â€” unwrap one level
             let inner = pair.into_inner().next().unwrap();
-            build_atom(inner)
+            build_atom(inner, strings)
         }
-        Rule::postfix_expr => build_postfix_expr(pair),
-        Rule::expr => build_expr(pair),
+        Rule::postfix_expr => build_postfix_expr(pair, strings),
+        Rule::expr => build_expr(pair, strings),
         Rule::interpolation => {
-            let kind = build_interpolation(pair)?;
+            let kind = build_interpolation(pair, strings)?;
             Ok(Spanned::new(kind, span))
         }
         Rule::reference => {
@@ -552,25 +732,22 @@ fn build_atom(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>
             Ok(Spanned::new(kind, span))
         }
         Rule::processor_call => {
-            let kind = build_processor_call(pair)?;
+            let kind = build_processor_call(pair, strings)?;
             Ok(Spanned::new(kind, span))
         }
         Rule::command_call => {
-            let cmd = build_command_call(pair)?;
+            let cmd = build_command_call(pair, strings)?;
             Ok(Spanned::new(ExprKind::CommandCall(cmd), span))
         }
         Rule::trigger => {
-            let kind = build_trigger(pair)?;
+            let kind = build_trigger(pair, strings)?;
             Ok(Spanned::new(kind, span))
         }
         Rule::document_ref => {
-            let kind = build_document_ref(pair)?;
+            let kind = build_document_ref(pair, strings)?;
             Ok(Spanned::new(kind, span))
         }
-        Rule::quoted_string => {
-            let s = extract_string_content(pair);
-            Ok(Spanned::new(ExprKind::Literal(Value::String(s)), span))
-        }
+        Rule::quoted_string => build_string(pair, strings),
         Rule::number => {
             let n: f64 = pair.as_str().parse().map_err(|_| {
                 vec![ParseError::new(
@@ -586,53 +763,309 @@ fn build_atom(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>
         }
         Rule::none_literal => Ok(Spanned::new(ExprKind::Literal(Value::None), span)),
         Rule::array_literal => {
-            let mut elements = Vec::new();
-            for inner_pair in pair.into_inner() {
-                if inner_pair.as_rule() == Rule::expr {
-                    elements.push(build_expr(inner_pair)?);
-                }
-            }
-            Ok(Spanned::new(ExprKind::ArrayLiteral(elements), span))
+            let items = build_array_items(pair.into_inner().collect(), strings)?;
+            Ok(Spanned::new(ExprKind::ArrayLiteral(items), span))
         }
         Rule::object_literal => {
-            let mut entries: Vec<ObjectEntry> = Vec::new();
-            let mut errors = Vec::new();
-
-            for entry_pair in pair.into_inner() {
-                if entry_pair.as_rule() != Rule::object_entry {
-                    continue;
+            let items = build_object_items(pair.into_inner().collect(), strings)?;
+            check_duplicate_keys(&items)?;
+            Ok(Spanned::new(ExprKind::ObjectLiteral(items), span))
+        }
+        Rule::raw_string => {
+            // `r"..."` — no escapes, and no template even in data mode.
+            let inner = pair
+                .into_inner()
+                .find(|p| p.as_rule() == Rule::raw_inner)
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_default();
+            Ok(Spanned::new(ExprKind::Literal(Value::String(inner)), span))
+        }
+        Rule::variant_literal => {
+            let mut inner = pair.into_inner();
+            let name = inner.next().unwrap().as_str().to_string();
+            let mut values = Vec::new();
+            for arg in inner {
+                if arg.as_rule() == Rule::expr {
+                    values.push(build_expr(arg, strings)?);
                 }
-                let entry_span = pair_span(&entry_pair);
-                let mut parts = entry_pair.into_inner();
-                let key_pair = parts.next().unwrap();
-                let key = match key_pair.as_rule() {
-                    Rule::quoted_string => extract_string_content(key_pair),
-                    _ => key_pair.as_str().to_string(),
-                };
-                let value = build_expr(parts.next().unwrap())?;
-
-                // Objects are sorted maps, so a repeated key would silently
-                // discard one of the two values written.
-                if entries.iter().any(|e| e.key == key) {
-                    errors.push(
-                        ParseError::new(entry_span, format!("duplicate object key: {key}"))
-                            .with_hint("each key may appear only once in an object literal"),
-                    );
-                    continue;
-                }
-                entries.push(ObjectEntry { key, value });
             }
-
-            if !errors.is_empty() {
-                return Err(errors);
-            }
-            Ok(Spanned::new(ExprKind::ObjectLiteral(entries), span))
+            Ok(Spanned::new(ExprKind::Variant { name, values }, span))
         }
         _ => Err(vec![ParseError::new(
             span,
             format!("unexpected rule in atom position: {:?}", rule),
         )]),
     }
+}
+
+// -- Collection items ----------------------------------------------------
+
+/// Build the items of an array literal.
+///
+/// An item is an element, or a loop or conditional that stands in for one
+/// and contributes however many elements it produces.
+fn build_array_items(
+    pairs: Vec<pest::iterators::Pair<Rule>>,
+    strings: Strings,
+) -> Result<Vec<ArrayItem>, Vec<ParseError>> {
+    let mut items = Vec::new();
+    for pair in pairs {
+        match pair.as_rule() {
+            Rule::expr => items.push(ArrayItem::Element(build_expr(pair, strings)?)),
+            Rule::array_foreach => {
+                items.push(ArrayItem::ForEach(build_value_foreach(
+                    pair,
+                    strings,
+                    build_array_items,
+                )?));
+            }
+            Rule::array_if => {
+                items.push(ArrayItem::If(build_value_if(
+                    pair,
+                    strings,
+                    build_array_items,
+                )?));
+            }
+            _ => {}
+        }
+    }
+    Ok(items)
+}
+
+/// Build the items of an object literal — entries, and what yields entries.
+fn build_object_items(
+    pairs: Vec<pest::iterators::Pair<Rule>>,
+    strings: Strings,
+) -> Result<Vec<ObjectItem>, Vec<ParseError>> {
+    let mut items = Vec::new();
+    for pair in pairs {
+        match pair.as_rule() {
+            Rule::object_entry => items.push(ObjectItem::Entry(build_object_entry(pair, strings)?)),
+            Rule::object_foreach => {
+                items.push(ObjectItem::ForEach(build_value_foreach(
+                    pair,
+                    strings,
+                    build_object_items,
+                )?));
+            }
+            Rule::object_if => {
+                items.push(ObjectItem::If(build_value_if(
+                    pair,
+                    strings,
+                    build_object_items,
+                )?));
+            }
+            _ => {}
+        }
+    }
+    Ok(items)
+}
+
+fn build_object_entry(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<ObjectEntry, Vec<ParseError>> {
+    let mut parts = pair.into_inner();
+    let key_pair = parts.next().unwrap();
+    let key_span = pair_span(&key_pair);
+
+    let key = match key_pair.as_rule() {
+        // A quoted key follows whatever a quoted value does, so in data
+        // mode `"{{k}}"` is a computed key with no syntax of its own.
+        Rule::quoted_string => build_string(key_pair, strings)?,
+        _ => Spanned::new(
+            ExprKind::Literal(Value::String(key_pair.as_str().to_string())),
+            key_span,
+        ),
+    };
+    let value = build_expr(parts.next().unwrap(), strings)?;
+    Ok(ObjectEntry { key, value })
+}
+
+/// Reject a key written twice.
+///
+/// Objects are sorted maps, so a repeat would silently discard one of the
+/// two values. Only keys known without evaluating anything can be checked
+/// here; a computed key that collides is caught at evaluation time.
+fn check_duplicate_keys(items: &[ObjectItem]) -> Result<(), Vec<ParseError>> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut errors = Vec::new();
+    for item in items {
+        let ObjectItem::Entry(entry) = item else {
+            continue;
+        };
+        let Some(key) = entry.static_key() else {
+            continue;
+        };
+        if seen.contains(&key) {
+            errors.push(
+                ParseError::new(entry.key.span, format!("duplicate object key: {key}"))
+                    .with_hint("each key may appear only once in an object literal"),
+            );
+        } else {
+            seen.push(key);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// The item builder for one collection kind.
+///
+/// Passing it to the block builders is what keeps an element out of object
+/// position and an entry out of array position: the loop body is built by
+/// the same function that built its surroundings, so a mismatch has no rule
+/// to parse against.
+type ItemBuilder<T> =
+    fn(Vec<pest::iterators::Pair<Rule>>, Strings) -> Result<Vec<T>, Vec<ParseError>>;
+
+/// Build a `{# foreach #}` standing in item position.
+fn build_value_foreach<T>(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+    build_items: ItemBuilder<T>,
+) -> Result<ValueForEach<T>, Vec<ParseError>> {
+    let mut inner = pair.into_inner();
+
+    let open = inner.next().unwrap();
+    let mut open_parts = content_pairs(open);
+    let binding = open_parts.next().unwrap().as_str().to_string();
+    let iterable = build_expr(open_parts.next().unwrap(), strings)?;
+
+    let body_pairs = inner
+        .filter(|p| p.as_rule() != Rule::foreach_close)
+        .collect();
+
+    Ok(ValueForEach {
+        binding,
+        iterable,
+        body: build_items(body_pairs, strings)?,
+    })
+}
+
+/// Build a `{# if #}` standing in item position, with its branches.
+fn build_value_if<T>(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+    build_items: ItemBuilder<T>,
+) -> Result<ValueIf<T>, Vec<ParseError>> {
+    let mut branches: Vec<(Expr, Vec<T>)> = Vec::new();
+    let mut else_body = None;
+
+    // The first condition comes from `if_open`; the items that follow it,
+    // up to the first branch tag, are its body.
+    let mut condition: Option<Expr> = None;
+    let mut body_pairs: Vec<pest::iterators::Pair<Rule>> = Vec::new();
+
+    for child in pair.into_inner() {
+        match child.as_rule() {
+            Rule::if_open => {
+                condition = Some(build_expr(content_pairs(child).next().unwrap(), strings)?);
+            }
+            Rule::array_elif | Rule::object_elif => {
+                if let Some(open) = condition.take() {
+                    branches.push((open, build_items(std::mem::take(&mut body_pairs), strings)?));
+                }
+                let mut parts = child.into_inner();
+                let tag = parts.next().unwrap();
+                condition = Some(build_expr(content_pairs(tag).next().unwrap(), strings)?);
+                body_pairs = parts.collect();
+            }
+            Rule::array_else | Rule::object_else => {
+                if let Some(open) = condition.take() {
+                    branches.push((open, build_items(std::mem::take(&mut body_pairs), strings)?));
+                }
+                let parts: Vec<_> = child
+                    .into_inner()
+                    .filter(|p| p.as_rule() != Rule::else_tag)
+                    .collect();
+                else_body = Some(build_items(parts, strings)?);
+            }
+            Rule::if_close => {}
+            _ => body_pairs.push(child),
+        }
+    }
+
+    // An `if` with no `elif` or `else` never hit a branch tag, so its body
+    // is still pending here.
+    if let Some(open) = condition.take() {
+        branches.push((open, build_items(body_pairs, strings)?));
+    }
+
+    Ok(ValueIf {
+        branches,
+        else_body,
+    })
+}
+
+/// Build a quoted string, as a value or as a nested text-mode template.
+fn build_string(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<Expr, Vec<ParseError>> {
+    let span = pair_span(&pair);
+    // The inner span excludes the quotes, so offsets inside the template
+    // land where the reader sees them.
+    let inner_start = pair
+        .clone()
+        .into_inner()
+        .next()
+        .map_or(span.start, |p| p.as_span().start());
+    let raw = pair
+        .clone()
+        .into_inner()
+        .next()
+        .map_or("", |p| p.as_str())
+        .to_string();
+    let content = extract_string_content(pair);
+
+    if strings == Strings::Literal {
+        return Ok(Spanned::new(
+            ExprKind::Literal(Value::String(content)),
+            span,
+        ));
+    }
+
+    let template = parse(&content).map_err(|errors| {
+        // Escape sequences shift the offsets, so exact positions are only
+        // available for a string that has none. Otherwise the whole literal
+        // is the best honest span.
+        let shifted = raw.len() == content.len();
+        errors
+            .into_iter()
+            .map(|mut e| {
+                e.span = if shifted {
+                    Span::new(inner_start + e.span.start, inner_start + e.span.end)
+                } else {
+                    span
+                };
+                e
+            })
+            .collect::<Vec<_>>()
+    })?;
+
+    // A string with no constructs is just a string. Folding it keeps the
+    // common case off the template path and leaves object keys statically
+    // checkable.
+    if let [node] = template.nodes.as_slice()
+        && let NodeKind::Literal(text) = &node.node
+    {
+        return Ok(Spanned::new(
+            ExprKind::Literal(Value::String(text.clone())),
+            span,
+        ));
+    }
+    if template.nodes.is_empty() {
+        return Ok(Spanned::new(
+            ExprKind::Literal(Value::String(String::new())),
+            span,
+        ));
+    }
+
+    Ok(Spanned::new(ExprKind::StringTemplate(template), span))
 }
 
 // -- Control flow building -----------------------------------------------
@@ -651,7 +1084,7 @@ fn build_if_block(pair: pest::iterators::Pair<Rule>) -> Result<(IfBlock, Trim), 
 
     let open = inner.next().unwrap();
     let open_trim = Trim::of(&open);
-    let condition = build_expr(content_pairs(open).next().unwrap())?;
+    let condition = build_expr(content_pairs(open).next().unwrap(), Strings::Literal)?;
 
     let mut body_pairs = Vec::new();
     let mut elif_branches: Vec<(ElifBranch, Trim)> = Vec::new();
@@ -663,7 +1096,7 @@ fn build_if_block(pair: pest::iterators::Pair<Rule>) -> Result<(IfBlock, Trim), 
             Rule::elif_branch => {
                 let trim = Trim::of(&child);
                 let mut elif_inner = content_pairs(child);
-                let elif_condition = build_expr(elif_inner.next().unwrap())?;
+                let elif_condition = build_expr(elif_inner.next().unwrap(), Strings::Literal)?;
                 let nodes = build_nodes(elif_inner)?;
                 elif_branches.push((
                     ElifBranch {
@@ -763,7 +1196,7 @@ fn build_foreach_block(
     // From foreach_open: identifier (binding) then expr (iterable)
     let mut open_inner = content_pairs(open);
     let binding = open_inner.next().unwrap().as_str().to_string();
-    let iterable = build_expr(open_inner.next().unwrap())?;
+    let iterable = build_expr(open_inner.next().unwrap(), Strings::Literal)?;
 
     let mut body_pairs = Vec::new();
     let mut close_trim = Trim::default();
@@ -870,28 +1303,70 @@ fn extract_string_content(pair: pest::iterators::Pair<Rule>) -> String {
     // quoted_string = ${ "\"" ~ string_inner ~ "\"" }
     let inner = pair.into_inner().next().map(|p| p.as_str()).unwrap_or("");
 
-    // Process escape sequences
+    // Process escape sequences. The set is JSON's, so a JSON string is a
+    // weaver string without being rewritten.
     let mut result = String::new();
-    let mut chars = inner.chars();
+    let mut chars = inner.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('n') => result.push('\n'),
-                Some('t') => result.push('\t'),
-                Some('r') => result.push('\r'),
-                Some('"') => result.push('"'),
-                Some('\\') => result.push('\\'),
-                Some(c) => {
-                    result.push('\\');
-                    result.push(c);
-                }
-                None => result.push('\\'),
-            }
-        } else {
+        if ch != '\\' {
             result.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => result.push('\n'),
+            Some('t') => result.push('\t'),
+            Some('r') => result.push('\r'),
+            Some('b') => result.push('\u{8}'),
+            Some('f') => result.push('\u{c}'),
+            Some('/') => result.push('/'),
+            Some('"') => result.push('"'),
+            Some('\\') => result.push('\\'),
+            Some('u') => result.push(take_unicode_escape(&mut chars)),
+            Some(c) => {
+                result.push('\\');
+                result.push(c);
+            }
+            None => result.push('\\'),
         }
     }
     result
+}
+
+/// Read the four hex digits of a `\uXXXX` escape, pairing surrogates.
+///
+/// The grammar has already established that four hex digits follow. A lone
+/// or mismatched surrogate has no character to stand for and becomes the
+/// replacement character rather than failing the parse — the same thing
+/// every JSON reader does with one.
+fn take_unicode_escape(chars: &mut std::iter::Peekable<std::str::Chars>) -> char {
+    let mut code = take_hex4(chars);
+
+    // A high surrogate is only half of a character; the low half follows as
+    // its own escape.
+    if (0xD800..0xDC00).contains(&code) {
+        let mut lookahead = chars.clone();
+        if lookahead.next() == Some('\\') && lookahead.next() == Some('u') {
+            let low = take_hex4(&mut lookahead);
+            if (0xDC00..0xE000).contains(&low) {
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                *chars = lookahead;
+            }
+        }
+    }
+
+    char::from_u32(code).unwrap_or('\u{fffd}')
+}
+
+fn take_hex4(chars: &mut std::iter::Peekable<std::str::Chars>) -> u32 {
+    let mut code = 0;
+    for _ in 0..4 {
+        let Some(digit) = chars.peek().and_then(|c| c.to_digit(16)) else {
+            break;
+        };
+        chars.next();
+        code = code * 16 + digit;
+    }
+    code
 }
 
 fn parse_bin_op(s: &str) -> BinOp {
@@ -1295,16 +1770,11 @@ mod multiline_tests {
                     ExprKind::ArrayLiteral(elems) => {
                         assert_eq!(elems.len(), 4);
                         // Check types: string, number, processor, trigger
-                        assert!(matches!(
-                            &elems[0].node,
-                            ExprKind::Literal(Value::String(_))
-                        ));
-                        assert!(matches!(
-                            &elems[1].node,
-                            ExprKind::Literal(Value::Number(_))
-                        ));
-                        assert!(matches!(&elems[2].node, ExprKind::ProcessorCall(_)));
-                        assert!(matches!(&elems[3].node, ExprKind::Trigger(_)));
+                        let kind = |i: usize| &elems[i].as_element().unwrap().node;
+                        assert!(matches!(kind(0), ExprKind::Literal(Value::String(_))));
+                        assert!(matches!(kind(1), ExprKind::Literal(Value::Number(_))));
+                        assert!(matches!(kind(2), ExprKind::ProcessorCall(_)));
+                        assert!(matches!(kind(3), ExprKind::Trigger(_)));
                     }
                     other => panic!("expected array literal, got {other:?}"),
                 }

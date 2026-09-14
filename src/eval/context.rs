@@ -87,6 +87,21 @@ pub trait EvalContext: Any {
         registry: &Registry,
     ) -> Result<String, EvalError>;
 
+    /// Check that a declared input's value is acceptable.
+    ///
+    /// Called once per `Ref<Kind>` value at instantiation, before the
+    /// document is expanded. `Ref<Character>` means "a Snowflake that must
+    /// resolve to a live Character", and only the host can answer that —
+    /// the language checks the shape of everything else itself.
+    ///
+    /// The default accepts anything, so a host that does not use data mode
+    /// (or does not need the check) is unaffected. Returning `Err` reports
+    /// the failure against the declaration that asked for the value.
+    #[cfg(feature = "data")]
+    fn validate_input(&self, _kind: &str, _value: &Value) -> Result<(), EvalError> {
+        Ok(())
+    }
+
     /// Resolve a document reference and return its [`Value`].
     ///
     /// This is the path that lets one entry hand structured data to

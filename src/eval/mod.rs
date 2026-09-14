@@ -8,7 +8,7 @@
 //! The host's `EvalContext` only sees named scope operations like `"global"`
 //! and `"local"`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -19,8 +19,12 @@ use crate::error::{EvalError, EvalErrorKind};
 use crate::registry::Registry;
 
 mod context;
+#[cfg(feature = "data")]
+mod doc;
 
 pub use context::{EvalContext, SimpleContext};
+#[cfg(feature = "data")]
+pub use doc::{evaluate_value_doc, evaluate_value_doc_with_options, expand_value_doc};
 
 /// Evaluate a template against a context and registry, producing the final
 /// string output.
@@ -305,6 +309,12 @@ struct Evaluator {
     iteration_count: u64,
     /// Set by a flow statement, cleared by whatever handles it.
     flow: Option<Flow>,
+    /// The bound `input` scope of a data-mode document.
+    ///
+    /// `None` in text mode, where `input` is an ordinary host scope like
+    /// any other. In data mode the evaluator owns it, so a declared default
+    /// is applied in one place rather than by every host.
+    inputs: Option<BTreeMap<String, Value>>,
 }
 
 impl Evaluator {
@@ -315,7 +325,20 @@ impl Evaluator {
             node_count: 0,
             iteration_count: 0,
             flow: None,
+            inputs: None,
         }
+    }
+
+    /// Evaluate one expression outside any template, for data mode.
+    #[cfg(feature = "data")]
+    fn eval_doc_value(
+        &mut self,
+        expr: &Expr,
+        ctx: &mut impl EvalContext,
+        registry: &Registry,
+    ) -> Result<Value, EvalError> {
+        self.check_limits()?;
+        self.eval_expr(expr, ctx, registry)
     }
 
     /// Evaluate a template and resolve the flow state into a [`Value`].
@@ -598,21 +621,36 @@ impl Evaluator {
         match kind {
             ExprKind::Literal(val) => Ok(val.clone()),
 
-            ExprKind::ArrayLiteral(elements) => {
-                let mut values = Vec::with_capacity(elements.len());
-                for elem in elements {
-                    values.push(self.eval_expr(elem, ctx, registry)?);
-                }
+            ExprKind::ArrayLiteral(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                self.collect_array_items(items, &mut values, ctx, registry)?;
                 Ok(Value::Array(values))
             }
 
-            ExprKind::ObjectLiteral(entries) => {
-                let mut map = std::collections::BTreeMap::new();
-                for entry in entries {
-                    let value = self.eval_expr(&entry.value, ctx, registry)?;
-                    map.insert(entry.key.clone(), value);
-                }
+            ExprKind::ObjectLiteral(items) => {
+                let mut map = BTreeMap::new();
+                self.collect_object_items(items, &mut map, ctx, registry)?;
                 Ok(Value::Object(map))
+            }
+
+            ExprKind::StringTemplate(template) => {
+                Ok(Value::String(self.eval_template(template, ctx, registry)?))
+            }
+
+            ExprKind::Variant { name, values } => {
+                let inner = match values.len() {
+                    // A newtype variant carries its value directly; a tuple
+                    // variant carries a list. Both are what serde reads back.
+                    1 => self.eval_expr(&values[0], ctx, registry)?,
+                    _ => {
+                        let mut out = Vec::with_capacity(values.len());
+                        for value in values {
+                            out.push(self.eval_expr(value, ctx, registry)?);
+                        }
+                        Value::Array(out)
+                    }
+                };
+                Ok(Value::Object(BTreeMap::from([(name.clone(), inner)])))
             }
 
             ExprKind::Variable(var) => self.resolve_variable(var, span, ctx),
@@ -707,6 +745,123 @@ impl Evaluator {
                 self.eval_index(&base_val, &index_val, span)
             }
         }
+    }
+
+    /// Evaluate array items into the elements they produce.
+    fn collect_array_items(
+        &mut self,
+        items: &[ArrayItem],
+        out: &mut Vec<Value>,
+        ctx: &mut impl EvalContext,
+        registry: &Registry,
+    ) -> Result<(), EvalError> {
+        for item in items {
+            self.check_limits()?;
+            match item {
+                ArrayItem::Element(expr) => out.push(self.eval_expr(expr, ctx, registry)?),
+                ArrayItem::ForEach(loop_) => {
+                    self.eval_value_foreach(loop_, ctx, registry, |ev, body, ctx, registry| {
+                        ev.collect_array_items(body, out, ctx, registry)
+                    })?;
+                }
+                ArrayItem::If(cond) => {
+                    if let Some(body) = self.select_branch(cond, ctx, registry)? {
+                        self.collect_array_items(body, out, ctx, registry)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate object items into the entries they produce.
+    ///
+    /// A key must evaluate to a string, and a key produced twice is an
+    /// error rather than a silent overwrite — the same rule the parser
+    /// applies to keys it can see without evaluating.
+    fn collect_object_items(
+        &mut self,
+        items: &[ObjectItem],
+        out: &mut BTreeMap<String, Value>,
+        ctx: &mut impl EvalContext,
+        registry: &Registry,
+    ) -> Result<(), EvalError> {
+        for item in items {
+            self.check_limits()?;
+            match item {
+                ObjectItem::Entry(entry) => {
+                    let key = match self.eval_expr(&entry.key, ctx, registry)? {
+                        Value::String(key) => key,
+                        other => {
+                            return Err(EvalError::type_error("string", other.type_name())
+                                .with_span(entry.key.span));
+                        }
+                    };
+                    let value = self.eval_expr(&entry.value, ctx, registry)?;
+                    if out.insert(key.clone(), value).is_some() {
+                        return Err(EvalError::new(
+                            EvalErrorKind::TypeError,
+                            format!("duplicate object key: {key}"),
+                        )
+                        .with_span(entry.key.span));
+                    }
+                }
+                ObjectItem::ForEach(loop_) => {
+                    self.eval_value_foreach(loop_, ctx, registry, |ev, body, ctx, registry| {
+                        ev.collect_object_items(body, out, ctx, registry)
+                    })?;
+                }
+                ObjectItem::If(cond) => {
+                    if let Some(body) = self.select_branch(cond, ctx, registry)? {
+                        self.collect_object_items(body, out, ctx, registry)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Run a loop in item position, binding and iterating exactly as the
+    /// template-level `foreach` does — same scope discipline, same
+    /// iteration limit.
+    fn eval_value_foreach<T, C: EvalContext>(
+        &mut self,
+        loop_: &ValueForEach<T>,
+        ctx: &mut C,
+        registry: &Registry,
+        mut body: impl FnMut(&mut Self, &[T], &mut C, &Registry) -> Result<(), EvalError>,
+    ) -> Result<(), EvalError> {
+        let iterable = self.eval_expr(&loop_.iterable, ctx, registry)?;
+        let Value::Array(values) = iterable else {
+            return Err(
+                EvalError::not_iterable(iterable.type_name()).with_span(loop_.iterable.span)
+            );
+        };
+
+        for value in values {
+            self.check_iteration_limit()?;
+            self.push_scope();
+            self.bind(loop_.binding.clone(), value);
+            let result = body(self, &loop_.body, ctx, registry);
+            self.pop_scope();
+            result?;
+        }
+        Ok(())
+    }
+
+    /// The branch of a conditional in item position whose body should run.
+    fn select_branch<'a, T>(
+        &mut self,
+        cond: &'a ValueIf<T>,
+        ctx: &mut impl EvalContext,
+        registry: &Registry,
+    ) -> Result<Option<&'a [T]>, EvalError> {
+        for (condition, body) in &cond.branches {
+            if self.eval_expr(condition, ctx, registry)?.is_truthy() {
+                return Ok(Some(body));
+            }
+        }
+        Ok(cond.else_body.as_deref())
     }
 
     /// Index a value by a subscript computed at runtime.
@@ -838,6 +993,19 @@ impl Evaluator {
                     && let Some(root) = self.resolve_lexical(&var.name)
                 {
                     return self.walk_path(&root, var, span);
+                }
+
+                // In a data-mode document the evaluator owns `input`, so a
+                // declared default is not something the host has to know
+                // about. In text mode `inputs` is None and this falls
+                // through to the host like any other scope.
+                if scope == "input"
+                    && let Some(inputs) = &self.inputs
+                {
+                    return match inputs.get(&var.name) {
+                        Some(root) => self.walk_path(root, var, span),
+                        None => self.missing_variable(var, span),
+                    };
                 }
 
                 // The host is only asked for the part of the path it could

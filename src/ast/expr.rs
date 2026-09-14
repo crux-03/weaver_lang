@@ -1,4 +1,5 @@
 use super::span::Spanned;
+use super::template::Template;
 pub use super::value::PathSegment;
 use super::value::Value;
 
@@ -9,15 +10,30 @@ pub enum ExprKind {
     /// Literal value: "hello", 42, true, none
     Literal(Value),
 
-    /// Array literal: [1, 2, "three"]
-    ArrayLiteral(Vec<Expr>),
+    /// Array literal: `[1, 2, "three"]`, or a loop that yields elements.
+    ArrayLiteral(Vec<ArrayItem>),
 
-    /// Object literal: {name: "Alice", hp: 10}
+    /// Object literal: `{name: "Alice", hp: 10}`, or a loop that yields
+    /// entries.
     ///
-    /// Entries are held in source order so a duplicate key can be reported
+    /// Items are held in source order so a duplicate key can be reported
     /// against the second one; evaluation collects them into the sorted
     /// [`Value::Object`](crate::Value::Object) map.
-    ObjectLiteral(Vec<ObjectEntry>),
+    ObjectLiteral(Vec<ObjectItem>),
+
+    /// A string literal that is itself a text-mode template.
+    ///
+    /// Only data mode builds these — in text mode a quoted string is a
+    /// plain [`Literal`](ExprKind::Literal), because the prose around it is
+    /// already the template. A raw string (`r"..."`) is always a literal.
+    StringTemplate(Template),
+
+    /// An enum variant: `Custom([...])`, `Pair(a, b)`.
+    ///
+    /// Sugar for serde's externally tagged representation — one value is
+    /// wrapped as `{name: value}`, several as `{name: [values]}` — so a
+    /// Rust enum can be written the way it reads in Rust.
+    Variant { name: String, values: Vec<Expr> },
 
     /// Variable reference: {{scope:name}}
     Variable(VariableRef),
@@ -60,8 +76,85 @@ pub enum ExprKind {
 /// One `key: value` pair in an object literal.
 #[derive(Debug, Clone)]
 pub struct ObjectEntry {
-    pub key: String,
+    /// An identifier key is a string literal; a quoted key in data mode is
+    /// a template, which is how `"{{k}}": v` names a computed key. The
+    /// expression must evaluate to a string.
+    pub key: Expr,
     pub value: Expr,
+}
+
+impl ObjectEntry {
+    /// The key if it is known without evaluating anything.
+    ///
+    /// Used to reject a duplicate at parse time. A computed key can only
+    /// collide at evaluation time, where it is reported the same way.
+    pub fn static_key(&self) -> Option<&str> {
+        match &self.key.node {
+            ExprKind::Literal(Value::String(key)) => Some(key),
+            _ => None,
+        }
+    }
+}
+
+/// One item of an array literal.
+///
+/// An item is usually an element, but a loop or a conditional may stand in
+/// its place and contribute however many elements it produces.
+#[derive(Debug, Clone)]
+pub enum ArrayItem {
+    Element(Expr),
+    ForEach(ValueForEach<ArrayItem>),
+    If(ValueIf<ArrayItem>),
+}
+
+impl ArrayItem {
+    /// The element, when this item is a plain one rather than a loop or a
+    /// conditional standing in for one.
+    pub fn as_element(&self) -> Option<&Expr> {
+        match self {
+            ArrayItem::Element(expr) => Some(expr),
+            _ => None,
+        }
+    }
+}
+
+/// One item of an object literal — an entry, or something that yields
+/// entries.
+#[derive(Debug, Clone)]
+pub enum ObjectItem {
+    Entry(ObjectEntry),
+    ForEach(ValueForEach<ObjectItem>),
+    If(ValueIf<ObjectItem>),
+}
+
+impl ObjectItem {
+    /// The entry, when this item is a plain one.
+    pub fn as_entry(&self) -> Option<&ObjectEntry> {
+        match self {
+            ObjectItem::Entry(entry) => Some(entry),
+            _ => None,
+        }
+    }
+}
+
+/// `{# foreach x in xs #}` in item position.
+///
+/// The type parameter is the item kind of the collection it sits in, which
+/// is how an element in object position — or an entry in array position —
+/// fails to parse rather than evaluating to something surprising.
+#[derive(Debug, Clone)]
+pub struct ValueForEach<T> {
+    pub binding: String,
+    pub iterable: Expr,
+    pub body: Vec<T>,
+}
+
+/// `{# if c #}` in item position, with its `elif` and `else` branches.
+#[derive(Debug, Clone)]
+pub struct ValueIf<T> {
+    /// Condition and body for `if` and each `elif`, in source order.
+    pub branches: Vec<(Expr, Vec<T>)>,
+    pub else_body: Option<Vec<T>>,
 }
 
 /// A variable reference: an optional scope, a name, and an optional dotted

@@ -14,6 +14,30 @@
 template        = { SOI ~ node* ~ EOI }
 expr_standalone = { SOI ~ ws ~ expr ~ ws ~ EOI }
 
+// ── Data mode ───────────────────────────────────────────────────────────
+//
+// A second entry rule, not a second language: a document is one value with
+// holes rather than prose with holes. Everything below it — expressions,
+// literals, loops in item position — is the same grammar text mode uses.
+
+value_doc = { SOI ~ ws ~ inputs_block? ~ ws ~ expr ~ ws ~ EOI }
+
+/// Declared inputs, so the instantiation form can be generated rather than
+/// guessed at. The block ends where the declarations stop parsing, which is
+/// the line the document's value begins on.
+inputs_block = { "#inputs" ~ kw_end ~ (sep ~ input_decl)* ~ sep? }
+
+input_decl = { identifier ~ ws ~ ":" ~ ws ~ input_type ~ (ws ~ "=" ~ ws ~ expr)? }
+
+/// The type vocabulary is small and closed: it names a *kind*, not a shape.
+/// Structural validation of the expanded document is serde's job.
+input_type = _{ list_type | enum_type | ref_type | prim_type }
+
+list_type = { "[" ~ ws ~ input_type ~ ws ~ "]" }
+enum_type = { "enum" ~ ws ~ "(" ~ ws ~ (quoted_string ~ (sep ~ quoted_string)* ~ sep?)? ~ ws ~ ")" }
+ref_type  = { "Ref" ~ ws ~ "<" ~ ws ~ identifier ~ ws ~ ">" }
+prim_type = { ("string" | "number" | "bool") ~ kw_end }
+
 node = _{
     if_block
   | foreach_block
@@ -166,6 +190,13 @@ else_branch = {
     "{#" ~ trim_l? ~ ws ~ "else" ~ kw_end ~ ws ~ trim_r? ~ "#}" ~ node*
 }
 
+/// The same tags standing alone, for item position. Text mode keeps its own
+/// body-bearing rules above: their trim markers have to sit as direct
+/// children of the branch, and whitespace in item position carries no
+/// meaning to trim.
+elif_tag = { "{#" ~ trim_l? ~ ws ~ "elif" ~ kw_end ~ ws ~ expr ~ ws ~ trim_r? ~ "#}" }
+else_tag = { "{#" ~ trim_l? ~ ws ~ "else" ~ kw_end ~ ws ~ trim_r? ~ "#}" }
+
 foreach_block = {
     foreach_open ~ node* ~ foreach_close
 }
@@ -221,11 +252,39 @@ atom = {
   | bool_literal
   | none_literal
   | number
+  | raw_string
   | quoted_string
+  | variant_literal
   | reference
 }
 
-array_literal = { "[" ~ ws ~ (expr ~ (sep ~ expr)* ~ sep?)? ~ ws ~ "]" }
+// ── Enum variants: Custom([...]) ────────────────────────────────────────
+//
+// Sugar for serde's externally tagged form: `Custom(x)` is `{Custom: x}` and
+// `Pair(a, b)` is `{Pair: [a, b]}`. The parenthesis must be glued to the
+// name, so a reference on one line and a parenthesised expression on the
+// next stay two items. A unit variant is the plain string `"RoundRobin"`,
+// which is what serde reads it from and what keeps it apart from a
+// reference.
+
+variant_literal = { identifier ~ "(" ~ ws ~ variant_args? ~ ws ~ ")" }
+variant_args    = _{ expr ~ (sep ~ expr)* ~ sep? }
+
+// ── Collections ─────────────────────────────────────────────────────────
+//
+// A loop in item position yields *elements* in an array and *entries* in an
+// object. They are different enough that the two contexts get their own item
+// rules, which makes a mismatch a parse error rather than something that
+// surfaces as a strange value at evaluation time.
+
+array_literal = { "[" ~ ws ~ array_items? ~ ws ~ "]" }
+array_items   = _{ array_item ~ (sep ~ array_item)* ~ sep? }
+array_item    = _{ array_foreach | array_if | expr }
+
+array_foreach = { foreach_open ~ ws ~ array_items? ~ ws ~ foreach_close }
+array_if      = { if_open ~ ws ~ array_items? ~ ws ~ array_elif* ~ array_else? ~ if_close }
+array_elif    = { elif_tag ~ ws ~ array_items? ~ ws }
+array_else    = { else_tag ~ ws ~ array_items? ~ ws }
 
 // ── Object literals: {name: "Alice", hp: 10} ────────────────────────────
 //
@@ -233,8 +292,19 @@ array_literal = { "[" ~ ws ~ (expr ~ (sep ~ expr)* ~ sep?)? ~ ws ~ "]" }
 // written. `{` is unambiguous here: `{{` is an interpolation and `{#` a
 // control tag, both tried first, and neither can begin an object.
 
-object_literal = { "{" ~ ws ~ (object_entry ~ (sep ~ object_entry)* ~ sep?)? ~ ws ~ "}" }
+object_literal = { "{" ~ ws ~ object_items? ~ ws ~ "}" }
+object_items   = _{ object_item ~ (sep ~ object_item)* ~ sep? }
+object_item    = _{ object_foreach | object_if | object_entry }
+
+object_foreach = { foreach_open ~ ws ~ object_items? ~ ws ~ foreach_close }
+object_if      = { if_open ~ ws ~ object_items? ~ ws ~ object_elif* ~ object_else? ~ if_close }
+object_elif    = { elif_tag ~ ws ~ object_items? ~ ws }
+object_else    = { else_tag ~ ws ~ object_items? ~ ws }
+
 object_entry   = { object_key ~ ws ~ ":" ~ ws ~ expr }
+
+/// A key is an identifier or a string. In data mode a string is a template,
+/// which is what makes `"{{k}}": v` a computed key — no separate syntax.
 object_key     = _{ identifier | quoted_string }
 
 // ── Separators ──────────────────────────────────────────────────────────
@@ -271,16 +341,28 @@ unary_op = { "!" | "-" }
 // it `truename` would match `true` and leave `name` dangling.
 
 bool_literal = @{ ("true" | "false") ~ kw_end }
-none_literal = @{ "none" ~ kw_end }
 
+/// `none` and JSON's `null` are the same absence. The alias exists so a
+/// JSON file is a data document without being edited first.
+none_literal = @{ ("none" | "null") ~ kw_end }
+
+/// JSON's number grammar, exponent included.
 number = @{
-    "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)?
+    "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
 }
+
+/// A raw string, opting out of everything: no escape sequences, and in data
+/// mode no template parsing either. `r"..."`, or `r#"..."#` when the text
+/// contains a quote. This is the escape hatch for prose that legitimately
+/// contains `{{`, `[[`, `@[`, `$[` or `<trigger`.
+raw_string = ${ "r" ~ PUSH("#"*) ~ "\"" ~ raw_inner ~ "\"" ~ POP }
+raw_inner  = @{ (!("\"" ~ PEEK) ~ ANY)* }
 
 /// Double-quoted string with escape sequences
 quoted_string = ${ "\"" ~ string_inner ~ "\"" }
 string_inner  = @{ (escape_seq | !("\"" | "\\") ~ ANY)* }
-escape_seq    = @{ "\\" ~ ("\"" | "\\" | "n" | "t" | "r") }
+escape_seq    = @{ "\\" ~ ("\"" | "\\" | "/" | "n" | "t" | "r" | "b" | "f" | unicode_escape) }
+unicode_escape = @{ "u" ~ ASCII_HEX_DIGIT{4} }
 
 // ── Identifiers ─────────────────────────────────────────────────────────
 
@@ -319,5 +401,10 @@ trim_r = { "-" }
 // expression contexts. `ws_inline` is the same thing without line breaks,
 // for the places where a newline carries meaning.
 
-ws        = _{ (" " | "\t" | "\r" | "\n")* }
-ws_inline = _{ (" " | "\t")* }
+ws        = _{ (" " | "\t" | "\r" | "\n" | line_comment)* }
+ws_inline = _{ (" " | "\t" | line_comment)* }
+
+/// `// to end of line`, wherever whitespace is allowed between tokens. A
+/// comment ends the line for the operator rule too, so it cannot glue two
+/// items together.
+line_comment = _{ "//" ~ (!NEWLINE ~ ANY)* }

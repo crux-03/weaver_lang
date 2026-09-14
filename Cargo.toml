@@ -26,6 +26,10 @@ serde_json = "1"
 [features]
 default = ["macros"]
 macros = ["dep:macros"]
+# Data mode: `#inputs` declarations and a document that is one value with
+# holes rather than prose with holes. Gates the API, the AST and evaluation;
+# the grammar itself is one file and is always compiled.
+data = []
 # Serialize signature metadata — for hosts that ship the registry's
 # vocabulary to an editor frontend.
 serde = ["dep:serde"]
