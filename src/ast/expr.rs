@@ -253,19 +253,27 @@ impl VariableRef {
 pub struct ProcessorCall {
     pub namespace: String,
     pub name: String,
-    pub properties: Vec<ProcessorProperty>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProcessorProperty {
-    pub key: String,
-    pub value: Expr,
+    pub args: Vec<CallArg>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CommandCall {
     pub name: String,
-    pub args: Vec<Expr>,
+    pub args: Vec<CallArg>,
+}
+
+/// One argument of a processor or command call, as written.
+///
+/// Both callables take the same list. Whether an argument needs a name is a
+/// property of the signature it is being matched against, not of the
+/// syntax: a processor receives named properties and a command receives a
+/// positional list, and the registry maps one onto the other using the
+/// declared signature.
+#[derive(Debug, Clone)]
+pub struct CallArg {
+    /// `Some` for `key: value`, `None` for a bare positional argument.
+    pub name: Option<String>,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone)]

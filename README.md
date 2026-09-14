@@ -57,6 +57,7 @@ assert_eq!(template.evaluate(&mut ctx, &registry).unwrap(), "HP: 42");
 | indexing   | `{{items[0]}}`, `{{obj["key"]}}`, `{{party[i].name}}` |
 | processors | `@[namespace.name(foo: value1, bar: value2)]`         |
 | commands   | `$[name(foo, bar)]`                                   |
+| arguments  | named or positional on either: `@[p(1, 2)]`, `$[c(a: 1)]` |
 | triggers   | `<trigger id="some_id">`                              |
 | documents  | `[[some_id]]`                                         |
 | if/else    | `{# if foo == bar #} baz {# endif #}`                 |
@@ -159,23 +160,53 @@ assert_eq!(alice.to_json(), r#"{"name":"Alice","stats":{"hp":10}}"#);
 
 **Assignment** is still the host's business — a literal builds a value, but binding it to a name goes through a command such as `set_var`. `Value::set_path` is provided so that command folds paths into objects the same way reads unfold them (creating intermediate objects as needed, refusing to overwrite a non-object).
 
-### Processors — `@[namespace.name(key: value)]`
+### Processors — `@[namespace.name(...)]`
 
-Pure computations with named properties. No access to evaluation state.
+Pure computations. No access to evaluation state.
 
 ```
 @[math.add(a: 1, b: 2)]
 @[core.weaver.rng(min: 1, max: 100)]
 ```
 
-### Commands — `$[name(arg1, arg2)]`
+### Commands — `$[name(...)]`
 
-Stateful operations with positional arguments. Can read/write variables through the evaluation context.
+Stateful operations. Can read and write variables through the evaluation context.
 
 ```
 $[set_var("global:name", "Alice")]
 $[greet("world")]
 ```
+
+### Arguments
+
+**Property markers are optional on both.** A processor's `call` receives named properties and a command's receives a positional list, but that is a detail of the traits, not something a template should have to track. Write whichever reads better:
+
+```
+@[math.add(a: 1, b: 2)]      @[math.add(1, 2)]
+$[greet(name: "world")]      $[greet("world")]
+```
+
+Named arguments may be written in any order, and the two forms mix as long as positional ones come first:
+
+```
+@[text.repeat("ab", count: 3)]
+$[join(1, c: 3, b: 2)]
+```
+
+Matching one form to the other goes through the **declared signature**, so a callable registered by the `#[weaver_processor]` / `#[weaver_command]` macros — which declare their parameters automatically — supports both with no extra work. A closure registered without `.property()` or `.param()` declares nothing to match against, so it keeps working in its own form and says so plainly if you use the other.
+
+A name given twice, or given to a slot a positional argument already filled, is an error. So is a positional argument after a named one.
+
+**A leading `name:` is always a marker.** At the top level of an argument list, `$[cmd(local:x)]` names an argument `local` — it does not pass the reference `local:x`. Interpolate or parenthesise to pass one:
+
+```
+$[cmd({{local:x}})]      reference
+$[cmd((local:x))]        reference
+@[p(v: [local:a, b:c])]  nested, so both are references
+```
+
+The rule reaches only that top level; inside any nested literal a colon is an ordinary scoped reference.
 
 When a command appears alone on a line, the entire line is consumed — no blank line is left in the output:
 
@@ -862,6 +893,7 @@ These hold in both modes. The value grammar is shared, so a literal means the sa
 - Enum sugar covers newtype and tuple variants (`Custom(x)`, `Range(1, 10)`). A struct variant is written as the object serde reads it from: `{Custom: {a: 1}}`.
 - Comments are `//` to end of line. There is no block comment form.
 - Document evaluation depends on the host's `resolve_document` implementation.
+- Writing an argument in the form a callable's trait does not take requires a declared signature to map through. A closure registered without `.property()` or `.param()` can only be called the way its `call` receives arguments — named for a processor, positional for a command.
 
 ### Text mode
 

@@ -16,7 +16,7 @@ use crate::ast::expr::*;
 use crate::ast::template::*;
 use crate::ast::value::Value;
 use crate::error::{EvalError, EvalErrorKind};
-use crate::registry::Registry;
+use crate::registry::{CallArgs, Registry};
 
 mod context;
 #[cfg(feature = "data")]
@@ -656,13 +656,9 @@ impl Evaluator {
             ExprKind::Variable(var) => self.resolve_variable(var, span, ctx),
 
             ExprKind::ProcessorCall(call) => {
-                let mut props = HashMap::new();
-                for prop in &call.properties {
-                    let val = self.eval_expr(&prop.value, ctx, registry)?;
-                    props.insert(prop.key.clone(), val);
-                }
+                let args = self.eval_call_args(&call.args, ctx, registry)?;
                 let result = registry
-                    .call_processor(&call.namespace, &call.name, props)
+                    .call_processor(&call.namespace, &call.name, args)
                     .map_err(|e| {
                         if e.span.is_none() {
                             e.with_span(span)
@@ -922,6 +918,27 @@ impl Evaluator {
         }
     }
 
+    /// Evaluate a call's arguments, keeping each name as written.
+    ///
+    /// Matching them to what the callable expects is the registry's job —
+    /// it is the only thing that can see the signature.
+    fn eval_call_args(
+        &mut self,
+        args: &[CallArg],
+        ctx: &mut impl EvalContext,
+        registry: &Registry,
+    ) -> Result<CallArgs, EvalError> {
+        let mut out = CallArgs::new();
+        for arg in args {
+            let value = self.eval_expr(&arg.value, ctx, registry)?;
+            match &arg.name {
+                Some(name) => out.named(name.clone(), value),
+                None => out.positional(value),
+            }
+        }
+        Ok(out)
+    }
+
     /// Evaluate a trigger/document id expression and require it to be a
     /// string. A non-string id (e.g. `none`, a number, an array) is a type
     /// error rather than being silently coerced — this keeps the common
@@ -947,10 +964,7 @@ impl Evaluator {
         ctx: &mut impl EvalContext,
         registry: &Registry,
     ) -> Result<Option<Value>, EvalError> {
-        let mut args = Vec::with_capacity(cmd.args.len());
-        for arg in &cmd.args {
-            args.push(self.eval_expr(arg, ctx, registry)?);
-        }
+        let args = self.eval_call_args(&cmd.args, ctx, registry)?;
         registry.call_command(&cmd.name, args, ctx).map_err(|e| {
             if e.span.is_none() {
                 e.with_span(span)
@@ -1167,19 +1181,28 @@ impl Evaluator {
 // ── Lenient mode: raw syntax reconstruction ─────────────────────────────
 
 fn reconstruct_processor(call: &ProcessorCall) -> String {
-    let mut s = format!("@[{}.{}(", call.namespace, call.name);
-    for (i, prop) in call.properties.iter().enumerate() {
-        if i > 0 {
-            s.push_str(", ");
-        }
-        s.push_str(&format!("{}: ...", prop.key));
-    }
-    s.push_str(")]");
-    s
+    format!(
+        "@[{}.{}({})]",
+        call.namespace,
+        call.name,
+        reconstruct_args(&call.args)
+    )
+}
+
+/// Reproduce an argument list in the form it was written, so lenient
+/// output stays re-parseable.
+fn reconstruct_args(args: &[CallArg]) -> String {
+    args.iter()
+        .map(|arg| match &arg.name {
+            Some(name) => format!("{name}: ..."),
+            None => "...".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn reconstruct_command(cmd: &CommandCall) -> String {
-    format!("$[{}(...)]", cmd.name)
+    format!("$[{}({})]", cmd.name, reconstruct_args(&cmd.args))
 }
 
 fn reconstruct_trigger(entry_id: &str) -> String {

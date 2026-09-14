@@ -487,27 +487,15 @@ fn build_processor_call(
     let dotted = inner.next().unwrap().as_str().to_string();
     let (namespace, name) = split_dotted_name(&dotted);
 
-    let mut properties = Vec::new();
-    if let Some(prop_list) = inner.next()
-        && prop_list.as_rule() == Rule::property_list
-    {
-        for prop_pair in prop_list.into_inner() {
-            if prop_pair.as_rule() == Rule::property {
-                let mut prop_inner = prop_pair.into_inner();
-                let key = prop_inner.next().unwrap().as_str().to_string();
-                let value_expr = build_expr(prop_inner.next().unwrap(), strings)?;
-                properties.push(ProcessorProperty {
-                    key,
-                    value: value_expr,
-                });
-            }
-        }
-    }
+    let args = match inner.next() {
+        Some(list) if list.as_rule() == Rule::call_args => build_call_args(list, strings)?,
+        _ => Vec::new(),
+    };
 
     Ok(ExprKind::ProcessorCall(ProcessorCall {
         namespace,
         name,
-        properties,
+        args,
     }))
 }
 
@@ -518,18 +506,75 @@ fn build_command_call(
     let mut inner = content_pairs(pair);
     let name = inner.next().unwrap().as_str().to_string();
 
-    let mut args = Vec::new();
-    if let Some(arg_list) = inner.next()
-        && arg_list.as_rule() == Rule::arg_list
-    {
-        for arg_pair in arg_list.into_inner() {
-            if arg_pair.as_rule() == Rule::expr {
-                args.push(build_expr(arg_pair, strings)?);
-            }
-        }
-    }
+    let args = match inner.next() {
+        Some(list) if list.as_rule() == Rule::call_args => build_call_args(list, strings)?,
+        _ => Vec::new(),
+    };
 
     Ok(CommandCall { name, args })
+}
+
+/// Build one argument list, shared by processors and commands.
+///
+/// Positional arguments must come before named ones, as in most languages
+/// with both: a positional argument after a name has no slot left to
+/// occupy that the reader could work out.
+fn build_call_args(
+    pair: pest::iterators::Pair<Rule>,
+    strings: Strings,
+) -> Result<Vec<CallArg>, Vec<ParseError>> {
+    let mut args: Vec<CallArg> = Vec::new();
+    let mut errors = Vec::new();
+    let mut first_named: Option<String> = None;
+
+    for arg_pair in pair.into_inner() {
+        if arg_pair.as_rule() != Rule::call_arg {
+            continue;
+        }
+        let span = pair_span(&arg_pair);
+        let mut parts = arg_pair.into_inner().peekable();
+
+        let name = match parts.peek().map(|p| p.as_rule()) {
+            Some(Rule::arg_name) => Some(parts.next().unwrap().as_str().to_string()),
+            _ => None,
+        };
+        let value = build_expr(parts.next().unwrap(), strings)?;
+
+        match (&name, &first_named) {
+            (Some(name), _) => {
+                if args
+                    .iter()
+                    .any(|a| a.name.as_deref() == Some(name.as_str()))
+                {
+                    errors.push(
+                        ParseError::new(span, format!("argument given twice: {name}"))
+                            .with_hint("each named argument may appear only once"),
+                    );
+                    continue;
+                }
+                if first_named.is_none() {
+                    first_named = Some(name.clone());
+                }
+            }
+            (None, Some(named)) => {
+                errors.push(
+                    ParseError::new(span, "positional argument after a named one").with_hint(
+                        format!("move it before `{named}:`, or give it a name of its own"),
+                    ),
+                );
+                continue;
+            }
+            (None, None) => {}
+        }
+
+        args.push(CallArg { name, value });
+    }
+
+    if errors.is_empty() {
+        Ok(args)
+    } else {
+        Err(errors)
+    }
 }
 
 fn build_trigger(
@@ -1647,9 +1692,9 @@ mod tests {
             NodeKind::Expression(ExprKind::ProcessorCall(p)) => {
                 assert_eq!(p.namespace, "core.weaver");
                 assert_eq!(p.name, "rng");
-                assert_eq!(p.properties.len(), 2);
-                assert_eq!(p.properties[0].key, "min");
-                assert_eq!(p.properties[1].key, "max");
+                assert_eq!(p.args.len(), 2);
+                assert_eq!(p.args[0].name.as_deref().unwrap(), "min");
+                assert_eq!(p.args[1].name.as_deref().unwrap(), "max");
             }
             _ => panic!("expected processor call"),
         }
@@ -1676,8 +1721,8 @@ mod tests {
             NodeKind::Expression(ExprKind::ProcessorCall(p)) => {
                 assert_eq!(p.namespace, "core.weaver");
                 assert_eq!(p.name, "wildcard");
-                assert_eq!(p.properties.len(), 1);
-                assert_eq!(p.properties[0].key, "items");
+                assert_eq!(p.args.len(), 1);
+                assert_eq!(p.args[0].name.as_deref().unwrap(), "items");
             }
             _ => panic!("expected processor call"),
         }
@@ -1763,10 +1808,10 @@ mod multiline_tests {
             NodeKind::Expression(ExprKind::ProcessorCall(p)) => {
                 assert_eq!(p.namespace, "core");
                 assert_eq!(p.name, "pick_random");
-                assert_eq!(p.properties.len(), 1);
-                assert_eq!(p.properties[0].key, "items");
+                assert_eq!(p.args.len(), 1);
+                assert_eq!(p.args[0].name.as_deref().unwrap(), "items");
                 // The value should be an array with 4 elements
-                match &p.properties[0].value.node {
+                match &p.args[0].value.node {
                     ExprKind::ArrayLiteral(elems) => {
                         assert_eq!(elems.len(), 4);
                         // Check types: string, number, processor, trigger

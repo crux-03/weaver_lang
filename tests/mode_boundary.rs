@@ -83,7 +83,10 @@ fn a_string_in_a_template_is_never_a_template() {
 #[test]
 fn null_is_a_reserved_word_in_expression_position() {
     // Binding it is still allowed, but reading it gives the literal.
-    assert_eq!(eval("{# foreach null in [1] #}{{null}}{# endforeach #}"), "");
+    assert_eq!(
+        eval("{# foreach null in [1] #}{{null}}{# endforeach #}"),
+        ""
+    );
     // Names that merely start with a keyword are unaffected.
     assert_eq!(
         eval(r#"{# foreach nullable in ["x"] #}{{nullable}}{# endforeach #}"#),

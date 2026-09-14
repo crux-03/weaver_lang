@@ -90,7 +90,9 @@ pub use macros;
 #[cfg(feature = "data")]
 pub use parser::parse_value_doc;
 pub use parser::{parse, parse_expr};
-pub use registry::{ClosureCommand, ClosureProcessor, Registry, WeaverCommand, WeaverProcessor};
+pub use registry::{
+    CallArgs, ClosureCommand, ClosureProcessor, Registry, WeaverCommand, WeaverProcessor,
+};
 
 /// Parse source text and evaluate it in a single step.
 ///

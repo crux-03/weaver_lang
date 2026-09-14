@@ -92,20 +92,31 @@ bare_ref   = { dotted_name }
 // ── Processors: @[namespace.name(key: value, key2: value2)] ─────────────
 
 processor_call = {
-    "@[" ~ trim_l? ~ ws ~ dotted_name ~ "(" ~ ws ~ property_list? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
+    "@[" ~ trim_l? ~ ws ~ dotted_name ~ "(" ~ ws ~ call_args? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
 }
-
-property_list = { property ~ (sep ~ property)* ~ sep? }
-
-property = { identifier ~ ws ~ ":" ~ ws ~ expr }
 
 // ── Commands: $[name(arg1, arg2)] ───────────────────────────────────────
 
 command_call = {
-    "$[" ~ trim_l? ~ ws ~ identifier ~ "(" ~ ws ~ arg_list? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
+    "$[" ~ trim_l? ~ ws ~ identifier ~ "(" ~ ws ~ call_args? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
 }
 
-arg_list = { expr ~ (sep ~ expr)* ~ sep? }
+// ── Call arguments ──────────────────────────────────────────────────────
+//
+// One rule for both callables: an argument may carry a name or not, and
+// which spelling a given processor or command wants is a property of its
+// signature rather than of its syntax.
+//
+// `arg_name ~ ":"` is tried before the expression, so a leading `name:` at
+// the top level of an argument list is always a marker — `$[cmd(local:x)]`
+// names an argument `local`, it does not pass the reference `local:x`.
+// Parenthesise or interpolate to pass one: `$[cmd((local:x))]`,
+// `$[cmd({{local:x}})]`. The rule reaches only this level; inside a nested
+// literal, `[local:a, local:b]` holds two references.
+
+call_args = { call_arg ~ (sep ~ call_arg)* ~ sep? }
+call_arg  = { (arg_name ~ ws ~ ":" ~ ws)? ~ expr }
+arg_name  = { identifier }
 
 // ── Triggers: <trigger id="entry-id"> or <trigger id={{var}}> ───────────
 

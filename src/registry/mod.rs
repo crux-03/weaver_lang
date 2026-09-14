@@ -30,7 +30,7 @@
 //! and `expected_type` cannot drift from what the body actually accepts.
 
 use crate::ast::value::Value;
-use crate::error::EvalError;
+use crate::error::{EvalError, EvalErrorKind};
 use crate::eval::EvalContext;
 use std::collections::HashMap;
 
@@ -38,11 +38,15 @@ use std::collections::HashMap;
 
 /// A callable command, invoked via `$[name(args)]` in templates.
 ///
-/// Commands take positional arguments and can mutate the evaluation
-/// context. Their return value is optional — returning `None` produces
-/// no output in template position.
+/// Commands can mutate the evaluation context. Their return value is
+/// optional — returning `None` produces no output in template position.
 pub trait WeaverCommand: Send + Sync {
     /// Execute the command with pre-evaluated positional arguments.
+    ///
+    /// A template may also name its arguments (`$[cmd(count: 2)]`). The
+    /// registry places those by position using
+    /// [`signature`](Self::signature) before calling, so this side always
+    /// sees the list; a slot no argument reached is [`Value::None`].
     ///
     /// The command receives mutable access to the evaluation context and
     /// an immutable reference to the registry, allowing it to read/write
@@ -58,16 +62,203 @@ pub trait WeaverCommand: Send + Sync {
     fn signature(&self) -> CommandSignature;
 }
 
-/// A callable processor, invoked via `@[namespace.name(key: value)]` in templates.
+/// A callable processor, invoked via `@[namespace.name(...)]` in templates.
 ///
-/// Processors take named properties (key-value pairs) and return a [`Value`].
-/// They are pure computations — they do not receive mutable context access.
+/// Processors return a [`Value`] and are pure computations — they do not
+/// receive mutable context access.
 pub trait WeaverProcessor: Send + Sync {
     /// Execute the processor with pre-evaluated named properties.
+    ///
+    /// A template may also write its arguments positionally
+    /// (`@[text.repeat("ab", 2)]`). The registry names those from
+    /// [`signature`](Self::signature) before calling, so this side always
+    /// sees the map.
     fn call(&self, properties: HashMap<String, Value>) -> Result<Value, EvalError>;
 
     /// Declare this processor's identity and property expectations.
     fn signature(&self) -> ProcessorSignature;
+}
+
+// ── Call arguments ──────────────────────────────────────────────────────
+
+/// Arguments to a callable, as written at the call site.
+///
+/// A processor's `call` receives named properties and a command's receives
+/// a positional list, but a template may write either form for either
+/// callable. This is the thing in between: the arguments as written, which
+/// the registry maps onto what the callable expects using its declared
+/// signature.
+///
+/// The mapping is only consulted when the two disagree. An all-named call
+/// to a processor and an all-positional call to a command never look at a
+/// signature at all, so a callable that declares nothing keeps working
+/// exactly as it always did.
+#[derive(Debug, Clone, Default)]
+pub struct CallArgs {
+    args: Vec<(Option<String>, Value)>,
+}
+
+impl CallArgs {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append an argument written without a name.
+    pub fn positional(&mut self, value: Value) {
+        self.args.push((None, value));
+    }
+
+    /// Append an argument written as `name: value`.
+    pub fn named(&mut self, name: impl Into<String>, value: Value) {
+        self.args.push((Some(name.into()), value));
+    }
+
+    pub fn len(&self) -> usize {
+        self.args.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.args.is_empty()
+    }
+
+    /// Whether any argument was written without a name.
+    pub fn has_positional(&self) -> bool {
+        self.args.iter().any(|(name, _)| name.is_none())
+    }
+
+    /// Whether any argument was written with a name.
+    pub fn has_named(&self) -> bool {
+        self.args.iter().any(|(name, _)| name.is_some())
+    }
+
+    /// Map these arguments onto the named properties a processor takes.
+    ///
+    /// `signature` is needed only to name positional arguments, and may be
+    /// `None` when there are none to name.
+    pub fn into_properties(
+        self,
+        signature: Option<&ProcessorSignature>,
+        namespace: &str,
+        name: &str,
+    ) -> Result<HashMap<String, Value>, EvalError> {
+        let declared = signature.map(|s| s.properties.as_slice()).unwrap_or(&[]);
+        let mut out = HashMap::with_capacity(self.args.len());
+        let mut next = 0;
+
+        for (arg_name, value) in self.args {
+            let key = match arg_name {
+                Some(key) => key,
+                None => {
+                    let Some(def) = declared.get(next) else {
+                        return Err(EvalError::new(
+                            EvalErrorKind::TypeError,
+                            if declared.is_empty() {
+                                format!(
+                                    "processor {namespace}.{name} declares no properties, so a positional argument cannot be matched to one — write it as `key: value`"
+                                )
+                            } else {
+                                format!(
+                                    "processor {namespace}.{name} declares {} properties, got a positional argument at position {}",
+                                    declared.len(),
+                                    next + 1
+                                )
+                            },
+                        ));
+                    };
+                    next += 1;
+                    def.key.clone()
+                }
+            };
+
+            if out.insert(key.clone(), value).is_some() {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!("processor {namespace}.{name} was given {key} twice"),
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Map these arguments onto the positional list a command takes.
+    ///
+    /// `signature` is needed only to place named arguments, and may be
+    /// `None` when there are none to place. A slot no argument reached —
+    /// because a later parameter was named — is filled with
+    /// [`Value::None`], which is what a command already sees for an
+    /// argument that was never supplied.
+    pub fn into_params(
+        self,
+        signature: Option<&CommandSignature>,
+        name: &str,
+    ) -> Result<Vec<Value>, EvalError> {
+        let declared = signature.map(|s| s.params.as_slice()).unwrap_or(&[]);
+        let mut slots: Vec<Option<Value>> = Vec::with_capacity(self.args.len());
+        let mut next = 0;
+
+        for (arg_name, value) in self.args {
+            let index = match &arg_name {
+                None => {
+                    let index = next;
+                    next += 1;
+                    index
+                }
+                Some(arg_name) => {
+                    let Some(index) = declared.iter().position(|p| &p.name == arg_name) else {
+                        return Err(EvalError::new(
+                            EvalErrorKind::TypeError,
+                            if declared.is_empty() {
+                                format!(
+                                    "command {name} declares no parameters, so `{arg_name}:` cannot be matched to one — pass it positionally"
+                                )
+                            } else {
+                                format!("command {name} has no parameter named {arg_name}")
+                            },
+                        ));
+                    };
+                    index
+                }
+            };
+
+            if index >= slots.len() {
+                slots.resize_with(index + 1, || None);
+            }
+            if slots[index].is_some() {
+                let which = declared
+                    .get(index)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| format!("argument {}", index + 1));
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!("command {name} was given {which} twice"),
+                ));
+            }
+            slots[index] = Some(value);
+        }
+
+        Ok(slots
+            .into_iter()
+            .map(|slot| slot.unwrap_or(Value::None))
+            .collect())
+    }
+}
+
+/// All-named arguments, as a processor's `call` already receives them.
+impl From<HashMap<String, Value>> for CallArgs {
+    fn from(map: HashMap<String, Value>) -> Self {
+        Self {
+            args: map.into_iter().map(|(k, v)| (Some(k), v)).collect(),
+        }
+    }
+}
+
+/// All-positional arguments, as a command's `call` already receives them.
+impl From<Vec<Value>> for CallArgs {
+    fn from(values: Vec<Value>) -> Self {
+        Self {
+            args: values.into_iter().map(|v| (None, v)).collect(),
+        }
+    }
 }
 
 // ── Signatures ──────────────────────────────────────────────────────────
@@ -204,7 +395,7 @@ impl Registry {
     }
 
     /// Declare an entity kind that `Ref<Kind>` may name.
-    /// 
+    ///
     /// ```rust
     /// # use weaver_lang::Registry;
     /// let mut registry = Registry::new();
@@ -272,11 +463,16 @@ impl Registry {
     pub fn call_command(
         &self,
         name: &str,
-        args: Vec<Value>,
+        args: impl Into<CallArgs>,
         ctx: &mut dyn EvalContext,
     ) -> Result<Option<Value>, EvalError> {
         match self.commands.get(name) {
-            Some(cmd) => cmd.call(args, ctx, self),
+            Some(cmd) => {
+                let args = args.into();
+                // The signature is only needed to place a named argument.
+                let signature = args.has_named().then(|| cmd.signature());
+                cmd.call(args.into_params(signature.as_ref(), name)?, ctx, self)
+            }
             None => Err(EvalError::undefined_command(name)),
         }
     }
@@ -287,11 +483,16 @@ impl Registry {
         &self,
         namespace: &str,
         name: &str,
-        properties: HashMap<String, Value>,
+        args: impl Into<CallArgs>,
     ) -> Result<Value, EvalError> {
         let key = format!("{namespace}.{name}");
         match self.processors.get(&key) {
-            Some(proc) => proc.call(properties),
+            Some(proc) => {
+                let args = args.into();
+                // The signature is only needed to name a positional argument.
+                let signature = args.has_positional().then(|| proc.signature());
+                proc.call(args.into_properties(signature.as_ref(), namespace, name)?)
+            }
             None => Err(EvalError::undefined_processor(namespace, name)),
         }
     }
@@ -362,7 +563,8 @@ where
         self
     }
 
-    /// Append a positional parameter. Order of calls is argument order.
+    /// Append a positional parameter. Order of calls is argument order,
+    /// and the name is what a named call matches against.
     pub fn param(
         mut self,
         name: impl Into<String>,
@@ -451,6 +653,8 @@ where
     }
 
     /// Declare a named property this processor reads.
+    ///
+    /// Order matters: it is the order a positional call fills them in.
     pub fn property(
         mut self,
         key: impl Into<String>,
