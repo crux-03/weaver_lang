@@ -606,6 +606,15 @@ impl Evaluator {
                 Ok(Value::Array(values))
             }
 
+            ExprKind::ObjectLiteral(entries) => {
+                let mut map = std::collections::BTreeMap::new();
+                for entry in entries {
+                    let value = self.eval_expr(&entry.value, ctx, registry)?;
+                    map.insert(entry.key.clone(), value);
+                }
+                Ok(Value::Object(map))
+            }
+
             ExprKind::Variable(var) => self.resolve_variable(var, span, ctx),
 
             ExprKind::ProcessorCall(call) => {
@@ -691,6 +700,70 @@ impl Evaluator {
                 let val = self.eval_expr(operand, ctx, registry)?;
                 eval_unary_op(*op, &val, span)
             }
+
+            ExprKind::Index { base, index } => {
+                let base_val = self.eval_expr(base, ctx, registry)?;
+                let index_val = self.eval_expr(index, ctx, registry)?;
+                self.eval_index(&base_val, &index_val, span)
+            }
+        }
+    }
+
+    /// Index a value by a subscript computed at runtime.
+    ///
+    /// A string subscript reads an object key, a whole non-negative number
+    /// reads an array position. Anything else is a type error rather than a
+    /// coercion — `items["0"]` is a mistake worth hearing about.
+    ///
+    /// A subscript that lands nowhere is treated as absent, the same as a
+    /// missing object key. Lenient mode cannot reconstruct a computed
+    /// subscript the way it reconstructs a reference — the source form of
+    /// `items[i]` depends on what `i` was — so it yields
+    /// [`Value::None`] instead of passing text through.
+    fn eval_index(
+        &self,
+        base: &Value,
+        index: &Value,
+        span: crate::ast::span::Span,
+    ) -> Result<Value, EvalError> {
+        let segment = match index {
+            Value::String(key) => PathSegment::Key(key.clone()),
+            Value::Number(n) => {
+                if !n.is_finite() || n.fract() != 0.0 || *n < 0.0 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        format!("index must be a whole, non-negative number, got {n}"),
+                    )
+                    .with_span(span));
+                }
+                PathSegment::Index(*n as usize)
+            }
+            other => {
+                return Err(
+                    EvalError::type_error("string or number", other.type_name()).with_span(span)
+                );
+            }
+        };
+
+        match base.get_segments(std::slice::from_ref(&segment)) {
+            Ok(Some(val)) => Ok(val.clone()),
+            Ok(None) if self.options.lenient => Ok(Value::None),
+            Ok(None) => Err(EvalError::new(
+                EvalErrorKind::UndefinedVariable,
+                match &segment {
+                    PathSegment::Key(key) => format!("no such key: {key}"),
+                    PathSegment::Index(i) => {
+                        format!(
+                            "index {i} is out of range for an array of {}",
+                            base.as_array().map_or(0, <[Value]>::len)
+                        )
+                    }
+                },
+            )
+            .with_span(span)),
+            Err(err) => {
+                Err(EvalError::new(EvalErrorKind::TypeError, err.to_string()).with_span(span))
+            }
         }
     }
 
@@ -767,8 +840,13 @@ impl Evaluator {
                     return self.walk_path(&root, var, span);
                 }
 
+                // The host is only asked for the part of the path it could
+                // plausibly resolve itself — named fields, up to the first
+                // subscript. The rest is walked here, against whatever it
+                // hands back.
+                let host_path = var.host_path();
                 let resolved = ctx
-                    .resolve_variable_path(scope, &var.name, &var.path)
+                    .resolve_variable_path(scope, &var.name, &host_path)
                     .map_err(|e| {
                         if e.span.is_none() {
                             e.with_span(span)
@@ -778,7 +856,7 @@ impl Evaluator {
                     })?;
 
                 match resolved {
-                    Some(val) => Ok(val),
+                    Some(val) => self.walk_segments(&val, var.local_path(), var, span),
                     None => self.missing_variable(var, span),
                 }
             }
@@ -797,7 +875,22 @@ impl Evaluator {
         var: &VariableRef,
         span: crate::ast::span::Span,
     ) -> Result<Value, EvalError> {
-        match root.get_path(&var.path) {
+        self.walk_segments(root, &var.path, var, span)
+    }
+
+    /// Walk `path` into `root`, reporting a dead end as `var` going missing.
+    ///
+    /// `var` is carried only for diagnostics: it is the reference as
+    /// written, which is what the reader needs to see, whether the walk
+    /// started at the root or resumed after the host answered part of it.
+    fn walk_segments(
+        &self,
+        root: &Value,
+        path: &[PathSegment],
+        var: &VariableRef,
+        span: crate::ast::span::Span,
+    ) -> Result<Value, EvalError> {
+        match root.get_segments(path) {
             Ok(Some(val)) => Ok(val.clone()),
             Ok(None) => self.missing_variable(var, span),
             Err(err) => {

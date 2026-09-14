@@ -37,6 +37,29 @@ pub enum Value {
     None,
 }
 
+/// One step of a path into a [`Value`].
+///
+/// A reference's path is static by construction: `{{c.items[0]}}` is two
+/// segments, but `{{c.items[i]}}` is a reference to `c.items` wrapped in an
+/// [`ExprKind::Index`](crate::ast::expr::ExprKind::Index), because `i`
+/// cannot be known until evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathSegment {
+    /// `.name` or `["name"]` — index an object.
+    Key(String),
+    /// `[0]` — index an array.
+    Index(usize),
+}
+
+impl fmt::Display for PathSegment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PathSegment::Key(k) => write!(f, "{k}"),
+            PathSegment::Index(i) => write!(f, "{i}"),
+        }
+    }
+}
+
 /// Why a dotted path could not be walked into a [`Value`].
 ///
 /// Distinguishes "there is no such key" (which the evaluator treats exactly
@@ -275,6 +298,45 @@ impl Value {
             };
             match map.get(segment) {
                 Some(next) => current = next,
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(current))
+    }
+
+    /// Walk a reference's path into this value.
+    ///
+    /// The segment-aware counterpart to [`get_path`](Value::get_path): a
+    /// [`Key`](PathSegment::Key) indexes an object, an
+    /// [`Index`](PathSegment::Index) indexes an array.
+    /// The three outcomes are the same, and an index past the end of an
+    /// array is `Ok(None)` — "absent" — exactly like a missing key.
+    ///
+    /// ```rust
+    /// use weaver_lang::{PathSegment, Value};
+    ///
+    /// let alice = Value::object([("gear", Value::from(vec!["sword", "shield"]))]);
+    /// let path = [PathSegment::Key("gear".into()), PathSegment::Index(1)];
+    /// assert_eq!(
+    ///     alice.get_segments(&path).unwrap(),
+    ///     Some(&Value::String("shield".into())),
+    /// );
+    /// ```
+    pub fn get_segments(&self, path: &[PathSegment]) -> Result<Option<&Value>, PathError> {
+        let mut current = self;
+        for segment in path {
+            let next = match (current, segment) {
+                (Value::Object(map), PathSegment::Key(key)) => map.get(key),
+                (Value::Array(items), PathSegment::Index(i)) => items.get(*i),
+                _ => {
+                    return Err(PathError {
+                        segment: segment.to_string(),
+                        found: current.type_name(),
+                    });
+                }
+            };
+            match next {
+                Some(value) => current = value,
                 None => return Ok(None),
             }
         }

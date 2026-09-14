@@ -52,6 +52,9 @@ assert_eq!(template.evaluate(&mut ctx, &registry).unwrap(), "HP: 42");
 | type       | syntax                                                |
 |------------|-------------------------------------------------------|
 | variables  | `{{scope:name}}`, `{{scope:name.path.into.object}}`    |
+| expressions| `{{ 1 + 2 }}`, `{{ global:gold - 10 }}`               |
+| literals   | `{name: "Alice", hp: 10}`, `["sword", "shield"]`      |
+| indexing   | `{{items[0]}}`, `{{obj["key"]}}`, `{{party[i].name}}` |
 | processors | `@[namespace.name(foo: value1, bar: value2)]`         |
 | commands   | `$[name(foo, bar)]`                                   |
 | triggers   | `<trigger id="some_id">`                              |
@@ -80,15 +83,61 @@ A reference may carry a **dotted path**. The first segment is the variable name 
    └────────────── scope
 ```
 
-Every non-leaf segment must be an object; see [Objects](#objects). Paths work on bare loop bindings too (`{{npc.name}}`), which is what makes `foreach` over an array of objects useful.
+Every non-leaf segment must be indexable — an object for a named segment, an array for a subscript; see [Objects](#objects). Paths work on bare loop bindings too (`{{npc.name}}`), which is what makes `foreach` over an array of objects useful.
+
+A reference is an ordinary expression atom, so the delimiters are only needed where the surrounding text is prose. Inside a construct, write the reference on its own:
+
+```
+{# if global:hp > 5 #}...{# endif #}
+{# foreach c in global:party #}...{# endforeach #}
+$[set_var("local:n", n + 1)]
+```
+
+A **bare** reference resolves against loop bindings only. `{{n}}` inside a `foreach` is the binding; outside one it is an error, even if the host holds a `local:n`. The host's scopes are reachable only through `scope:name`, so a template never silently reads state it did not name.
 
 A path that runs off the end of an object — `{{char:alice.stats.luck}}` where `luck` is absent — is reported exactly like a variable that does not exist: an `UndefinedVariable` error naming the full path, or, in lenient mode, the reference passed through unevaluated. Indexing something that *isn't* an object (`{{char:alice.stats.hp.max}}`) is a `TypeError` instead, because it can never be satisfied.
 
+### Indexing — `items[0]`, `obj["key"]`
+
+A subscript indexes an array by position or an object by key. `.name` and `["name"]` are the same thing, so a path may be written either way and the two mix freely:
+
+```
+{{char:alice.gear[0]}}          first item
+{{char:party[0].stats.hp}}      subscript, then a dotted path
+{{char:alice["stats"]["hp"]}}   same as {{char:alice.stats.hp}}
+{{char:alice.gear[global:slot]}}  computed subscript
+{{ ["a", "b"][1] }}             a literal is indexable too
+```
+
+A subscript must be **glued** to the value it indexes — no space before `[`. That is what keeps a newline usable as a separator: in
+
+```
+[a
+ [1]]
+```
+
+the second line is an element, not a subscript of the first.
+
+Three rules govern what a subscript means:
+
+- **Out of range is absent.** `{{items[9]}}` on a three-element array behaves exactly like a missing object key: an `UndefinedVariable` error, or the reference passed through in lenient mode. There is no silent `none`.
+- **Negative does not wrap.** `items[-1]` is a `TypeError`, not the last element. So is a fractional index. An off-by-one stays loud.
+- **Nothing is coerced.** A number indexes an array and a string indexes an object; `items["0"]` and `obj[0]` are type errors rather than guesses.
+
+A computed subscript is the one place lenient mode cannot pass source through — the text of `items[i]` depends on what `i` was — so it yields `none` instead. A constant subscript is folded into the reference's path at parse time and passes through like any other path.
+
 ### Objects
 
-`Value::Object` is a string-keyed map, supplied by the host. The language can read into it but has no syntax for building one — there is no object literal.
+Objects are string-keyed maps. They can be supplied by the host or written as a literal:
 
-Objects are deliberately minimal:
+```
+$[set_var("local:c", {name: "Alice", hp: 10})]
+{{ {party: [{name: "Alice"}, {name: "Bob"}]} }}
+```
+
+Keys are identifiers or quoted strings (`{"needs quoting": 1}`), so JSON parses as written. Values are arbitrary expressions. A **duplicate key is a parse error** rather than a silent discard, since the map is sorted and one of the two values would have to lose.
+
+Objects are otherwise deliberately minimal:
 
 - **Truthiness** — a non-empty object is truthy, an empty one is falsy, matching arrays and strings.
 - **Rendering** — an object in template position renders as **compact JSON** with keys in sorted order, so output is deterministic across runs. Hosts wanting pretty-printed output can register a processor that formats the value themselves.
@@ -107,7 +156,7 @@ let alice = Value::object([
 assert_eq!(alice.to_json(), r#"{"name":"Alice","stats":{"hp":10}}"#);
 ```
 
-**Writing** is the host's business — the language has no assignment syntax, so a `set_var`-style command belongs to your host. `Value::set_path` is provided so that command folds paths into objects the same way reads unfold them (creating intermediate objects as needed, refusing to overwrite a non-object).
+**Assignment** is still the host's business — a literal builds a value, but binding it to a name goes through a command such as `set_var`. `Value::set_path` is provided so that command folds paths into objects the same way reads unfold them (creating intermediate objects as needed, refusing to overwrite a non-object).
 
 ### Processors — `@[namespace.name(key: value)]`
 
@@ -326,7 +375,15 @@ Note that a marker is **all or nothing**. It cannot collapse a run of blank line
 
 ### Expressions and operators
 
-Expressions appear in conditions, arguments, and inline. Types are preserved internally (string, number, bool, array, none) and coerced to strings only at the template output level.
+Expressions appear in conditions, arguments, literals, and inside `{{ }}`. Types are preserved internally (string, number, bool, array, object, none) and coerced to strings only at the template output level.
+
+`{{ }}` holds any expression, not just a name, so inline arithmetic needs no processor:
+
+```
+{{ 1 + 2 }}
+{{ char:alice.stats.hp * 2 }}
+{{ {name: "Alice", hp: 10} }}
+```
 
 **Comparison:** `==`, `!=`, `<`, `>`, `<=`, `>=`
 **Logical:** `&&`, `||`, `!`
@@ -336,7 +393,30 @@ Expressions appear in conditions, arguments, and inline. Types are preserved int
 
 **Truthiness:** empty string, `0`, `false`, empty array, and `none` are falsy. Everything else is truthy.
 
-**Precedence** (highest to lowest): unary (!, -), arithmetic (*, /, +, -), comparison (==, !=, <, >, <=, >=), logical (&&, ||). Parentheses override precedence.
+**Precedence** (highest to lowest): indexing (`[]`, `.`), unary (!, -), arithmetic (*, /, +, -), comparison (==, !=, <, >, <=, >=), logical (&&, ||). Parentheses override precedence.
+
+**Line breaks.** An expression continues freely across lines *after* an operator, but a binary operator must start on the same line as its left operand:
+
+```
+@[p(x: 1 +
+       2)]      one expression
+@[p(x: 1
+     + 2)]      not one expression
+```
+
+This is what lets a newline separate elements. Without it `[1` / `-2]` on two lines would be the single element `-1` rather than the two elements written.
+
+**Separators.** Inside arrays, objects, argument lists and property lists, elements are separated by a comma, a newline, or both, and a trailing separator is allowed:
+
+```
+{
+  name: "Rags to Riches"
+  agents: [
+    {name: "Alice", role: "thief"}
+    {name: "Bob", role: "fence"}
+  ]
+}
+```
 
 ## Registering processors and commands
 
@@ -520,6 +600,8 @@ fn resolve_variable_path(
 }
 ```
 
+`path` holds **named** segments only, and stops at the first subscript. In `{{char:party[0].stats.hp}}` the host is asked for `party` with an empty path; the evaluator walks `[0].stats.hp` into the value it gets back. The split reflects what a host can plausibly push into storage: a field is addressable, a position in a returned array is not.
+
 ## Evaluation options
 
 Configure resource limits, cancellation, and lenient mode:
@@ -578,7 +660,10 @@ let err = EvalError::host_error("failed to load entry").with_source(io_err);
 - No assignment syntax in the language. Variable mutation goes through commands which hosts need to define.
 - Trim markers are all-or-nothing: `-` removes every whitespace character on its side, so it cannot collapse a run of blank lines to exactly one newline. This is shared with Jinja and Liquid.
 - Document evaluation depends on the host's `resolve_document` implementation.
-- Object support is read-only and partial: no object literals, no iteration, no equality, and paths index objects only. Array indexing (`items[0]`) and slicing are not supported — path segments are identifiers, so a numeric segment does not parse.
+- Objects do not iterate and do not compare equal with `==`. `foreach` still requires an array.
+- Slicing (`items[1:3]`) is not supported. A subscript selects one element.
+- Control flow cannot appear *inside* a literal: `[{# foreach ... #}...{# endforeach #}]` does not parse. Building a collection from a loop is the job of the planned data mode.
+- A bare reference (`{{n}}`) reads loop bindings only, never the host's `local` scope. Write `{{local:n}}` for that.
 
 ## Dependencies
 

@@ -254,7 +254,7 @@ fn build_node(pair: pest::iterators::Pair<Rule>) -> Result<Option<(Node, Trim)>,
             let text = pair.as_str().to_string();
             NodeKind::Literal(text)
         }
-        Rule::variable => NodeKind::Expression(build_variable(pair)?),
+        Rule::interpolation => NodeKind::Expression(build_interpolation(pair)?),
         Rule::processor_call => NodeKind::Expression(build_processor_call(pair)?),
         Rule::command_node => {
             // command_node wraps a command_call, which carries the markers.
@@ -292,10 +292,19 @@ fn build_node(pair: pest::iterators::Pair<Rule>) -> Result<Option<(Node, Trim)>,
 
 // -- Expression building -------------------------------------------------
 
-fn build_variable(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
+/// Unwrap `{{ expr }}` down to the expression it holds.
+///
+/// The interpolation contributes nothing but its delimiters — the node's
+/// own span already covers them — so only the inner expression survives.
+fn build_interpolation(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
     let inner = content_pairs(pair).next().unwrap();
+    Ok(build_expr(inner)?.node)
+}
+
+fn build_reference(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<ParseError>> {
+    let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
-        Rule::scoped_var => {
+        Rule::scoped_ref => {
             let mut parts = inner.into_inner();
             let scope = parts.next().unwrap().as_str().to_string();
             let (name, path) = split_var_path(parts.next().unwrap().as_str());
@@ -305,7 +314,7 @@ fn build_variable(pair: pest::iterators::Pair<Rule>) -> Result<ExprKind, Vec<Par
                 path,
             }))
         }
-        Rule::bare_var => {
+        Rule::bare_ref => {
             let (name, path) = split_var_path(inner.into_inner().next().unwrap().as_str());
             Ok(ExprKind::Variable(VariableRef {
                 scope: None,
@@ -442,7 +451,7 @@ fn build_unary_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<Parse
             "-" => UnaryOp::Neg,
             _ => unreachable!(),
         };
-        let operand = build_atom(inner.next().unwrap())?;
+        let operand = build_postfix_expr(inner.next().unwrap())?;
         Ok(Spanned::new(
             ExprKind::UnaryOp {
                 op,
@@ -451,7 +460,74 @@ fn build_unary_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<Parse
             span,
         ))
     } else {
-        build_atom(first)
+        build_postfix_expr(first)
+    }
+}
+
+/// Build an atom and apply the `[...]` / `.name` suffixes written on it.
+///
+/// A suffix on a plain reference is folded back into the reference's path
+/// when it is constant, so `{{c.items[0].name}}` stays one `VariableRef`
+/// and keeps the resolution and lenient-mode behaviour of `{{c.stats.hp}}`.
+/// Anything else — a computed index, a suffix on a call — becomes an
+/// [`ExprKind::Index`] evaluated against whatever the base produced.
+fn build_postfix_expr(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>> {
+    if pair.as_rule() != Rule::postfix_expr {
+        return build_atom(pair);
+    }
+
+    let start = pair_span(&pair).start;
+    let mut inner = pair.into_inner();
+    let mut expr = build_atom(inner.next().unwrap())?;
+
+    for suffix in inner {
+        let span = Span::new(start, pair_span(&suffix).end);
+        let index = match suffix.as_rule() {
+            Rule::field_suffix => {
+                let name = suffix.into_inner().next().unwrap().as_str().to_string();
+                Spanned::new(ExprKind::Literal(Value::String(name)), span)
+            }
+            Rule::index_suffix => build_expr(suffix.into_inner().next().unwrap())?,
+            _ => unreachable!(),
+        };
+        expr = apply_index(expr, index, span);
+    }
+
+    Ok(expr)
+}
+
+/// Fold a constant subscript into a reference path, or build an index node.
+fn apply_index(base: Expr, index: Expr, span: Span) -> Expr {
+    if let ExprKind::Variable(var) = &base.node
+        && let ExprKind::Literal(literal) = &index.node
+        && let Some(segment) = constant_segment(literal)
+    {
+        let mut var = var.clone();
+        var.path.push(segment);
+        return Spanned::new(ExprKind::Variable(var), span);
+    }
+
+    Spanned::new(
+        ExprKind::Index {
+            base: Box::new(base),
+            index: Box::new(index),
+        },
+        span,
+    )
+}
+
+/// The path segment a literal subscript denotes, if it denotes one.
+///
+/// A string is a key and a whole non-negative number is an index. A
+/// negative or fractional number is neither — it is left to evaluation,
+/// which reports it as the error it is rather than silently rounding.
+fn constant_segment(literal: &Value) -> Option<PathSegment> {
+    match literal {
+        Value::String(key) => Some(PathSegment::Key(key.clone())),
+        Value::Number(n) if n.fract() == 0.0 && *n >= 0.0 && n.is_finite() => {
+            Some(PathSegment::Index(*n as usize))
+        }
+        _ => None,
     }
 }
 
@@ -465,9 +541,14 @@ fn build_atom(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>
             let inner = pair.into_inner().next().unwrap();
             build_atom(inner)
         }
+        Rule::postfix_expr => build_postfix_expr(pair),
         Rule::expr => build_expr(pair),
-        Rule::variable => {
-            let kind = build_variable(pair)?;
+        Rule::interpolation => {
+            let kind = build_interpolation(pair)?;
+            Ok(Spanned::new(kind, span))
+        }
+        Rule::reference => {
+            let kind = build_reference(pair)?;
             Ok(Spanned::new(kind, span))
         }
         Rule::processor_call => {
@@ -512,6 +593,40 @@ fn build_atom(pair: pest::iterators::Pair<Rule>) -> Result<Expr, Vec<ParseError>
                 }
             }
             Ok(Spanned::new(ExprKind::ArrayLiteral(elements), span))
+        }
+        Rule::object_literal => {
+            let mut entries: Vec<ObjectEntry> = Vec::new();
+            let mut errors = Vec::new();
+
+            for entry_pair in pair.into_inner() {
+                if entry_pair.as_rule() != Rule::object_entry {
+                    continue;
+                }
+                let entry_span = pair_span(&entry_pair);
+                let mut parts = entry_pair.into_inner();
+                let key_pair = parts.next().unwrap();
+                let key = match key_pair.as_rule() {
+                    Rule::quoted_string => extract_string_content(key_pair),
+                    _ => key_pair.as_str().to_string(),
+                };
+                let value = build_expr(parts.next().unwrap())?;
+
+                // Objects are sorted maps, so a repeated key would silently
+                // discard one of the two values written.
+                if entries.iter().any(|e| e.key == key) {
+                    errors.push(
+                        ParseError::new(entry_span, format!("duplicate object key: {key}"))
+                            .with_hint("each key may appear only once in an object literal"),
+                    );
+                    continue;
+                }
+                entries.push(ObjectEntry { key, value });
+            }
+
+            if !errors.is_empty() {
+                return Err(errors);
+            }
+            Ok(Spanned::new(ExprKind::ObjectLiteral(entries), span))
         }
         _ => Err(vec![ParseError::new(
             span,
@@ -742,10 +857,13 @@ fn split_dotted_name(dotted: &str) -> (String, String) {
 /// processor's `namespace.name` at the *last* dot: a variable's host-facing
 /// name is the *first* segment and everything after it belongs to the
 /// value.
-fn split_var_path(dotted: &str) -> (String, Vec<String>) {
+fn split_var_path(dotted: &str) -> (String, Vec<PathSegment>) {
     let mut segments = dotted.split('.');
     let root = segments.next().unwrap_or_default().to_string();
-    (root, segments.map(str::to_string).collect())
+    (
+        root,
+        segments.map(|s| PathSegment::Key(s.to_string())).collect(),
+    )
 }
 
 fn extract_string_content(pair: pest::iterators::Pair<Rule>) -> String {
@@ -922,6 +1040,15 @@ fn trailing_ws_after_newline_norm(s: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
+    /// The `Key` segments a dotted path produces, for comparing against
+    /// what the parser built.
+    fn keys<const N: usize>(names: [&str; N]) -> Vec<PathSegment> {
+        names
+            .iter()
+            .map(|n| PathSegment::Key((*n).to_string()))
+            .collect()
+    }
+
     #[test]
     fn test_literal_text() {
         let template = parse("Hello, world!").unwrap();
@@ -967,11 +1094,8 @@ mod tests {
             NodeKind::Expression(ExprKind::Variable(v)) => {
                 assert_eq!(v.scope, Some("char".to_string()));
                 assert_eq!(v.name, "alice");
-                assert_eq!(v.path, ["inventory"]);
-                assert_eq!(
-                    v.path_segments().collect::<Vec<_>>(),
-                    ["alice", "inventory"]
-                );
+                assert_eq!(v.path, keys(["inventory"]));
+                assert_eq!(v.host_path(), ["inventory"]);
                 assert_eq!(v.full_name(), "alice.inventory");
             }
             _ => panic!("expected variable"),
@@ -985,7 +1109,7 @@ mod tests {
             NodeKind::Expression(ExprKind::Variable(v)) => {
                 assert_eq!(v.scope, Some("world".to_string()));
                 assert_eq!(v.name, "region");
-                assert_eq!(v.path, ["north", "weather"]);
+                assert_eq!(v.path, keys(["north", "weather"]));
             }
             _ => panic!("expected variable"),
         }
@@ -1000,7 +1124,7 @@ mod tests {
             NodeKind::Expression(ExprKind::Variable(v)) => {
                 assert_eq!(v.scope, None);
                 assert_eq!(v.name, "item");
-                assert_eq!(v.path, ["field"]);
+                assert_eq!(v.path, keys(["field"]));
             }
             _ => panic!("expected bare variable"),
         }

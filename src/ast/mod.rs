@@ -18,4 +18,4 @@ pub mod value;
 pub use expr::*;
 pub use span::{Span, Spanned};
 pub use template::*;
-pub use value::Value;
+pub use value::{PathSegment, Value};

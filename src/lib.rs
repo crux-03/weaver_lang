@@ -72,6 +72,7 @@ pub mod eval;
 mod parser;
 pub mod registry;
 
+pub use ast::expr::PathSegment;
 pub use ast::span::{Span, Spanned};
 pub use ast::template::Template;
 pub use ast::value::{PathError, Value};

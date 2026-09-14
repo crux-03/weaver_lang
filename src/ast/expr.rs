@@ -1,4 +1,6 @@
-use super::{span::Spanned, value::Value};
+use super::span::Spanned;
+pub use super::value::PathSegment;
+use super::value::Value;
 
 pub type Expr = Spanned<ExprKind>;
 
@@ -9,6 +11,13 @@ pub enum ExprKind {
 
     /// Array literal: [1, 2, "three"]
     ArrayLiteral(Vec<Expr>),
+
+    /// Object literal: {name: "Alice", hp: 10}
+    ///
+    /// Entries are held in source order so a duplicate key can be reported
+    /// against the second one; evaluation collects them into the sorted
+    /// [`Value::Object`](crate::Value::Object) map.
+    ObjectLiteral(Vec<ObjectEntry>),
 
     /// Variable reference: {{scope:name}}
     Variable(VariableRef),
@@ -37,6 +46,22 @@ pub enum ExprKind {
 
     /// Unary operation: !condition, -number
     UnaryOp { op: UnaryOp, operand: Box<Expr> },
+
+    /// Index into a value: `items[i]`, `obj["key"]`, `@[p()].name`.
+    ///
+    /// Only the dynamic cases reach here. A subscript written directly on a
+    /// reference with a constant index (`{{c.items[0].name}}`) is folded
+    /// into the reference's [`path`](VariableRef::path) at parse time, so it
+    /// keeps the same host resolution and lenient-mode passthrough as a
+    /// plain dotted path.
+    Index { base: Box<Expr>, index: Box<Expr> },
+}
+
+/// One `key: value` pair in an object literal.
+#[derive(Debug, Clone)]
+pub struct ObjectEntry {
+    pub key: String,
+    pub value: Expr,
 }
 
 /// A variable reference: an optional scope, a name, and an optional dotted
@@ -56,30 +81,67 @@ pub struct VariableRef {
     /// The root variable name — the part the host resolves. Never contains
     /// a dot.
     pub name: String,
-    /// Trailing path segments that index into the resolved value. Empty for
-    /// a plain reference; `["stats", "hp"]` for `{{char:alice.stats.hp}}`.
+    /// Trailing segments that index into the resolved value. Empty for a
+    /// plain reference; `[Key("stats"), Key("hp")]` for
+    /// `{{char:alice.stats.hp}}`, `[Key("items"), Index(0)]` for
+    /// `{{char:alice.items[0]}}`.
     ///
-    /// Every non-leaf segment must resolve to a [`crate::Value::Object`].
-    pub path: Vec<String>,
+    /// Every non-leaf segment must resolve to something indexable: an
+    /// object for a [`Key`](PathSegment::Key), an array for an
+    /// [`Index`](PathSegment::Index).
+    pub path: Vec<PathSegment>,
 }
 
 impl VariableRef {
-    /// All dotted segments, root first.
+    /// The leading run of [`Key`](PathSegment::Key) segments — the part of
+    /// the path a host can resolve on its own.
     ///
-    /// `{{char:alice.stats.hp}}` yields `["alice", "stats", "hp"]`; a plain
-    /// name yields a single element.
-    pub fn path_segments(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.name.as_str()).chain(self.path.iter().map(String::as_str))
+    /// This is what reaches
+    /// [`EvalContext::resolve_variable_path`](crate::EvalContext::resolve_variable_path).
+    /// It stops at the first subscript, because a host that pushes paths
+    /// into storage is indexing named fields, not array positions; whatever
+    /// follows is walked by the evaluator against the value it gets back.
+    pub fn host_path(&self) -> Vec<String> {
+        self.path
+            .iter()
+            .map_while(|seg| match seg {
+                PathSegment::Key(k) => Some(k.clone()),
+                PathSegment::Index(_) => None,
+            })
+            .collect()
     }
 
-    /// The dotted name as written, root included: `"alice.stats.hp"`.
+    /// The segments after [`host_path`](Self::host_path), which the
+    /// evaluator walks itself.
+    pub fn local_path(&self) -> &[PathSegment] {
+        let keys = self
+            .path
+            .iter()
+            .take_while(|seg| matches!(seg, PathSegment::Key(_)))
+            .count();
+        &self.path[keys..]
+    }
+
+    /// The name as written, root included: `"alice.stats.hp"`,
+    /// `"alice.items[0].name"`.
     ///
     /// Used for diagnostics — the host never sees this form.
     pub fn full_name(&self) -> String {
-        if self.path.is_empty() {
-            return self.name.clone();
+        let mut out = self.name.clone();
+        for seg in &self.path {
+            match seg {
+                PathSegment::Key(k) => {
+                    out.push('.');
+                    out.push_str(k);
+                }
+                PathSegment::Index(i) => {
+                    out.push('[');
+                    out.push_str(&i.to_string());
+                    out.push(']');
+                }
+            }
         }
-        self.path_segments().collect::<Vec<_>>().join(".")
+        out
     }
 
     /// Reconstruct the source form, `{{scope:name.path}}` or `{{name}}`.

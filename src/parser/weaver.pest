@@ -5,7 +5,9 @@
 // and expression (typed values inside constructs).
 // 
 // Template parsing is NOT whitespace-insensitive. Raw text matters.
-// Expression parsing (inside delimiters) IS whitespace-insensitive.
+// Expression parsing (inside constructs) IS whitespace-insensitive, with one
+// exception: a binary operator must begin on the same line as its left
+// operand. See `expr`.
 
 // ── Top-level ───────────────────────────────────────────────────────────
 
@@ -30,7 +32,7 @@ literal_text = @{
 // ── Expression nodes (template-level, result gets string-coerced) ───────
 
 expression_node = _{
-    variable
+    interpolation
   | processor_call
   | trigger
   | document_ref
@@ -40,16 +42,28 @@ expression_node = _{
 
 command_node = { command_call }
 
-// ── Variables: {{scope:name}} or {{name}} (bare loop binding) ───────────
+// ── Interpolation: {{ expr }} ───────────────────────────────────────────
 //
-// Either form may carry a dotted path (`{{char:alice.inventory}}`,
-// `{{npc.name}}`). The FIRST segment is the variable name — the part the
-// host resolves, or the loop binding. Every segment after it indexes into
-// the resolved value and must find an object along the way.
+// `{{ ... }}` holds any expression, not just a variable. The common case
+// is still a bare reference (`{{npc.name}}`, `{{global:hp}}`); arithmetic
+// (`{{ 1 + 2 }}`) and literals (`{{ {name: "Alice"} }}`) are the same rule.
 
-variable   = { "{{" ~ trim_l? ~ ws ~ (scoped_var | bare_var) ~ ws ~ trim_r? ~ "}}" }
-scoped_var = { identifier ~ ":" ~ dotted_name }
-bare_var   = { dotted_name }
+interpolation = { "{{" ~ trim_l? ~ ws ~ expr ~ ws ~ trim_r? ~ "}}" }
+
+// ── References: scope:name or a bare name, either with a dotted path ────
+//
+// A reference is an ordinary expression atom, so it is legal anywhere an
+// expression is: `{{global:hp}}`, `{# if global:hp > 5 #}`,
+// `$[set_var("local:n", n + 1)]`.
+//
+// The FIRST segment is the variable name — the part the host resolves, or
+// the loop binding. Every segment after it indexes into the resolved value.
+// A bare reference resolves against loop bindings only; the host's scopes
+// are reachable only through `scope:name`.
+
+reference  = { scoped_ref | bare_ref }
+scoped_ref = { identifier ~ ":" ~ dotted_name }
+bare_ref   = { dotted_name }
 
 // ── Processors: @[namespace.name(key: value, key2: value2)] ─────────────
 
@@ -57,7 +71,7 @@ processor_call = {
     "@[" ~ trim_l? ~ ws ~ dotted_name ~ "(" ~ ws ~ property_list? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
 }
 
-property_list = { property ~ (ws ~ "," ~ ws ~ property)* }
+property_list = { property ~ (sep ~ property)* ~ sep? }
 
 property = { identifier ~ ws ~ ":" ~ ws ~ expr }
 
@@ -67,7 +81,7 @@ command_call = {
     "$[" ~ trim_l? ~ ws ~ identifier ~ "(" ~ ws ~ arg_list? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
 }
 
-arg_list = { expr ~ (ws ~ "," ~ ws ~ expr)* }
+arg_list = { expr ~ (sep ~ expr)* ~ sep? }
 
 // ── Triggers: <trigger id="entry-id"> or <trigger id={{var}}> ───────────
 
@@ -81,7 +95,7 @@ trigger = {
 /// <trigger id=({{scope:base}} + "_suffix")>
 trigger_id = _{
     quoted_string
-  | variable
+  | interpolation
   | processor_call
   | command_call
   | "(" ~ ws ~ expr ~ ws ~ ")"
@@ -93,11 +107,16 @@ document_ref = {
     "[[" ~ ws ~ document_id ~ ws ~ "]]"
 }
 
-/// Note: in EXPRESSION position (not template position), `[[{{var}}]]`
-/// still parses as a nested array literal — array syntax takes precedence
-/// inside `atom`. Dynamic document ids are a template-level feature.
+/// `document_ref` is tried before `array_literal` inside `atom`, so
+/// `[[LOOT]]` is the document `LOOT` in every position rather than an array
+/// holding the array holding a reference. A genuinely nested single-element
+/// array needs a space: `[ [x] ]`. Anything with a second element —
+/// `[[a, b], [c]]` — is unambiguous and parses as an array either way.
+///
+/// The trailing `identifier` is a literal id, not a reference: `[[LOOT]]`
+/// names the document `LOOT` rather than reading a variable called `LOOT`.
 document_id = _{
-    variable
+    interpolation
   | processor_call
   | command_call
   | "(" ~ ws ~ expr ~ ws ~ ")"
@@ -127,55 +146,104 @@ stop_stmt = { "{#" ~ trim_l? ~ ws ~ "stop" ~ kw_end ~ ws ~ trim_r? ~ "#}" }
 kw_end = _{ !(ASCII_ALPHANUMERIC | "_") }
 
 // ── Control flow ────────────────────────────────────────────────────────
+//
+// Every keyword carries `kw_end` for the same reason the flow statements
+// do: now that a bare identifier is a valid expression, `{# iffy #}` would
+// otherwise start matching `if_open` and consume `fy` as its condition.
 
 if_block = {
     if_open ~ node* ~ elif_branch* ~ else_branch? ~ if_close
 }
 
-if_open  = { "{#" ~ trim_l? ~ ws ~ "if" ~ ws ~ expr ~ ws ~ trim_r? ~ "#}" }
-if_close = { "{#" ~ trim_l? ~ ws ~ "endif" ~ ws ~ trim_r? ~ "#}" }
+if_open  = { "{#" ~ trim_l? ~ ws ~ "if" ~ kw_end ~ ws ~ expr ~ ws ~ trim_r? ~ "#}" }
+if_close = { "{#" ~ trim_l? ~ ws ~ "endif" ~ kw_end ~ ws ~ trim_r? ~ "#}" }
 
 elif_branch = {
-    "{#" ~ trim_l? ~ ws ~ "elif" ~ ws ~ expr ~ ws ~ trim_r? ~ "#}" ~ node*
+    "{#" ~ trim_l? ~ ws ~ "elif" ~ kw_end ~ ws ~ expr ~ ws ~ trim_r? ~ "#}" ~ node*
 }
 
 else_branch = {
-    "{#" ~ trim_l? ~ ws ~ "else" ~ ws ~ trim_r? ~ "#}" ~ node*
+    "{#" ~ trim_l? ~ ws ~ "else" ~ kw_end ~ ws ~ trim_r? ~ "#}" ~ node*
 }
 
 foreach_block = {
     foreach_open ~ node* ~ foreach_close
 }
 
-foreach_open  = { "{#" ~ trim_l? ~ ws ~ "foreach" ~ ws ~ identifier ~ ws ~ "in" ~ ws ~ expr ~ ws ~ trim_r? ~ "#}" }
-foreach_close = { "{#" ~ trim_l? ~ ws ~ "endforeach" ~ ws ~ trim_r? ~ "#}" }
+foreach_open  = { "{#" ~ trim_l? ~ ws ~ "foreach" ~ kw_end ~ ws ~ identifier ~ ws ~ "in" ~ kw_end ~ ws ~ expr ~ ws ~ trim_r? ~ "#}" }
+foreach_close = { "{#" ~ trim_l? ~ ws ~ "endforeach" ~ kw_end ~ ws ~ trim_r? ~ "#}" }
 
 // ── Expressions ─────────────────────────────────────────────────────────
-// Used inside if conditions, processor values, command args, foreach iterables.
-// This layer is whitespace-insensitive (ws between tokens).
+// Used inside if conditions, processor values, command args, foreach
+// iterables, and `{{ }}`.
+//
+// Whitespace-insensitive with one exception: `ws_inline` before `bin_op`
+// means a binary operator must start on the same line as its left operand.
+// An expression still continues freely across lines *after* an operator:
+//
+//     @[p(x: 1 +          ok — the operator ends the line
+//            2)]
+//     @[p(x: 1
+//            + 2)]        not one expression
+//
+// That rule is what makes a newline usable as a separator (see `sep`). Were
+// `1` and `-2` on consecutive lines allowed to join, `[1\n-2]` would be the
+// single element `-1` rather than the two elements written.
 
-expr = { unary_expr ~ (ws ~ bin_op ~ ws ~ unary_expr)* }
+expr = { unary_expr ~ (ws_inline ~ bin_op ~ ws ~ unary_expr)* }
 
 unary_expr = {
-    unary_op ~ ws ~ atom
-  | atom
+    unary_op ~ ws ~ postfix_expr
+  | postfix_expr
 }
+
+// ── Indexing ────────────────────────────────────────────────────────────
+//
+// `items[0]`, `obj["key"]`, `items[i].name`. A suffix must be glued to the
+// value it indexes — no whitespace before `[` or `.` — so that a newline
+// separator can never be mistaken for an index: in `[a\n[1]]` the second
+// line is an element, not a subscript of the first.
+
+postfix_expr = { atom ~ postfix_op* }
+postfix_op   = _{ index_suffix | field_suffix }
+index_suffix = { "[" ~ ws ~ expr ~ ws ~ "]" }
+field_suffix = { "." ~ identifier }
 
 atom = {
     "(" ~ ws ~ expr ~ ws ~ ")"
+  | document_ref
   | array_literal
-  | variable
+  | interpolation
+  | object_literal
   | processor_call
   | command_call
   | trigger
-  | document_ref
   | bool_literal
   | none_literal
   | number
   | quoted_string
+  | reference
 }
 
-array_literal = { "[" ~ ws ~ (expr ~ (ws ~ "," ~ ws ~ expr)*)? ~ ws ~ "]" }
+array_literal = { "[" ~ ws ~ (expr ~ (sep ~ expr)* ~ sep?)? ~ ws ~ "]" }
+
+// ── Object literals: {name: "Alice", hp: 10} ────────────────────────────
+//
+// Keys are identifiers or quoted strings, so existing JSON parses as
+// written. `{` is unambiguous here: `{{` is an interpolation and `{#` a
+// control tag, both tried first, and neither can begin an object.
+
+object_literal = { "{" ~ ws ~ (object_entry ~ (sep ~ object_entry)* ~ sep?)? ~ ws ~ "}" }
+object_entry   = { object_key ~ ws ~ ":" ~ ws ~ expr }
+object_key     = _{ identifier | quoted_string }
+
+// ── Separators ──────────────────────────────────────────────────────────
+//
+// Comma or newline, and a trailing one is allowed. A loop that emits one
+// element per line needs neither to insert commas between generated items
+// nor to suppress the last one.
+
+sep = _{ ws_inline ~ (("," ~ ws) | (NEWLINE ~ ws ~ ("," ~ ws)?)) }
 
 // ── Operators ───────────────────────────────────────────────────────────
 
@@ -198,9 +266,12 @@ bin_op = {
 unary_op = { "!" | "-" }
 
 // ── Literals & atoms ────────────────────────────────────────────────────
+//
+// `kw_end` keeps the keywords from being prefixes of references: without
+// it `truename` would match `true` and leave `name` dangling.
 
-bool_literal = @{ "true" | "false" }
-none_literal = @{ "none" }
+bool_literal = @{ ("true" | "false") ~ kw_end }
+none_literal = @{ "none" ~ kw_end }
 
 number = @{
     "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)?
@@ -229,17 +300,24 @@ dotted_name = @{
 // separate rules so a lone marker can be told apart from its position in
 // the pair tree.
 //
-// There is no ambiguity with unary minus or subtraction. `{{-x}}` holds an
-// identifier, never an expression. In `{# if x -#}` pest's `expr` tries to
-// consume `- <atom>`, fails at `#}`, and backtracks the repetition — so
-// `{# if x - 1 -#}` parses as `x - 1` with a trailing marker, as written.
+// A left marker may not be followed by a digit, so `{{-1}}` is negative
+// one rather than a trim of `1`. Otherwise the rule is positional: `-`
+// glued to the opening delimiter trims, `-` after a space negates —
+// `{{-x}}` trims and renders `x`, `{{ -x }}` renders its negation.
+//
+// On the right there is no ambiguity to resolve. In `{# if x -#}` pest's
+// `expr` tries to consume `- <atom>`, fails at `#}`, and backtracks the
+// repetition — so `{# if x - 1 -#}` parses as `x - 1` with a trailing
+// marker, as written.
 
-trim_l = { "-" }
+trim_l = { "-" ~ !ASCII_DIGIT }
 trim_r = { "-" }
 
 // ── Whitespace (explicit, not implicit) ─────────────────────────────────
 // We do NOT use pest's implicit WHITESPACE rule because template-level
-// text is whitespace-significant. Instead we use `ws` explicitly
-// inside expression contexts.
+// text is whitespace-significant. Instead we use `ws` explicitly inside
+// expression contexts. `ws_inline` is the same thing without line breaks,
+// for the places where a newline carries meaning.
 
-ws = _{ (" " | "\t" | "\r" | "\n")* }
+ws        = _{ (" " | "\t" | "\r" | "\n")* }
+ws_inline = _{ (" " | "\t")* }
