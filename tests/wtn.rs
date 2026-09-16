@@ -631,3 +631,227 @@ difficulty: enum("easy", "normal", "brutal") = "normal"
         )
     );
 }
+
+// ── Extended declarations: objects and spaces ───────────────────────────
+//
+// Two things a form generator could not express before: a field-by-field
+// shape (`{char: Ref<Character>, talkativeness: number}`) and a bounded
+// space (`range`, `span`), which is a slider with one handle or two.
+
+const GROUP_CHAT: &str = r#"
+#inputs
+participants: [{char: Ref<Character>, talkativeness: number}]
+temperature: range(0, 2) = 0.8
+turns: span(1, 50) = {from: 4, to: 8}
+
+{
+  temperature: {{input:temperature}}
+  turns: {{input:turns}}
+  agents: [
+    {# foreach p in {{input:participants}} #}
+    { character: p.char, weight: p.talkativeness }
+    {# endforeach #}
+  ]
+}"#;
+
+fn group_chat_inputs() -> BTreeMap<String, Value> {
+    let mut supplied = BTreeMap::new();
+    supplied.insert(
+        "participants".to_string(),
+        Value::Array(vec![Value::object([
+            ("char", Value::from("snowflake-1")),
+            ("talkativeness", Value::from(0.5)),
+        ])]),
+    );
+    supplied
+}
+
+#[test]
+fn an_object_type_declares_the_fields_a_form_renders() {
+    let doc = parse_value_doc(GROUP_CHAT).unwrap();
+    assert_eq!(doc.inputs.len(), 3);
+
+    assert_eq!(
+        doc.inputs[0].ty,
+        InputType::List(Box::new(InputType::Object(vec![
+            ("char".into(), InputType::Ref("Character".into())),
+            ("talkativeness".into(), InputType::Number),
+        ])))
+    );
+    assert_eq!(
+        doc.inputs[0].ty.to_string(),
+        "[{char: Ref<Character>, talkativeness: number}]"
+    );
+
+    assert_eq!(doc.inputs[1].ty, InputType::Range(0.0, 2.0));
+    assert_eq!(doc.inputs[1].ty.to_string(), "range(0, 2)");
+    assert_eq!(doc.inputs[2].ty, InputType::Span(1.0, 50.0));
+    assert_eq!(doc.inputs[2].ty.to_string(), "span(1, 50)");
+}
+
+#[test]
+fn an_object_input_expands_with_its_fields_reachable() {
+    let doc = parse_value_doc(GROUP_CHAT).unwrap();
+    let mut host = RealmHost {
+        live: vec!["snowflake-1".into()],
+        ..Default::default()
+    };
+
+    let value =
+        weaver_lang::evaluate_value_doc(&doc, &group_chat_inputs(), &mut host, &realm_registry())
+            .unwrap();
+
+    assert_eq!(
+        value.to_json(),
+        concat!(
+            r#"{"agents":[{"character":"snowflake-1","weight":0.5}],"#,
+            r#""temperature":0.8,"turns":{"from":4,"to":8}}"#
+        )
+    );
+    // The `Ref` nested inside the object still went to the host.
+    assert_eq!(*host.validated.borrow(), ["Character:snowflake-1"]);
+}
+
+#[test]
+fn a_missing_field_is_reported_against_the_declaration() {
+    let doc = parse_value_doc(GROUP_CHAT).unwrap();
+    let mut host = RealmHost {
+        live: vec!["snowflake-1".into()],
+        ..Default::default()
+    };
+    let mut supplied = BTreeMap::new();
+    supplied.insert(
+        "participants".to_string(),
+        Value::Array(vec![Value::object([("char", "snowflake-1")])]),
+    );
+
+    let err =
+        weaver_lang::evaluate_value_doc(&doc, &supplied, &mut host, &realm_registry()).unwrap_err();
+    assert!(
+        err.message
+            .contains("input participants: missing field talkativeness (number)"),
+        "{}",
+        err.message
+    );
+    let span = err.span.expect("the declaration's span");
+    assert_eq!(
+        &GROUP_CHAT[span.start..span.end],
+        "participants: [{char: Ref<Character>, talkativeness: number}]"
+    );
+}
+
+#[test]
+fn a_field_the_type_never_declared_is_rejected() {
+    let doc = parse_value_doc(GROUP_CHAT).unwrap();
+    let mut host = RealmHost {
+        live: vec!["snowflake-1".into()],
+        ..Default::default()
+    };
+    let mut supplied = BTreeMap::new();
+    supplied.insert(
+        "participants".to_string(),
+        Value::Array(vec![Value::object([
+            ("char", Value::from("snowflake-1")),
+            ("talkativeness", Value::from(0.5)),
+            ("mood", Value::from("smug")),
+        ])]),
+    );
+
+    let err =
+        weaver_lang::evaluate_value_doc(&doc, &supplied, &mut host, &realm_registry()).unwrap_err();
+    assert!(
+        err.message
+            .contains("input participants: no such field: mood"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn a_range_holds_one_number_inside_its_space() {
+    let doc = parse_value_doc(GROUP_CHAT).unwrap();
+    let mut host = RealmHost {
+        live: vec!["snowflake-1".into()],
+        ..Default::default()
+    };
+
+    let mut supplied = group_chat_inputs();
+    supplied.insert("temperature".into(), Value::from(2.0));
+    assert!(
+        weaver_lang::evaluate_value_doc(&doc, &supplied, &mut host, &realm_registry()).is_ok(),
+        "the bounds are inclusive"
+    );
+
+    supplied.insert("temperature".into(), Value::from(2.5));
+    let err =
+        weaver_lang::evaluate_value_doc(&doc, &supplied, &mut host, &realm_registry()).unwrap_err();
+    assert!(
+        err.message
+            .contains("input temperature: 2.5 is outside range(0, 2)"),
+        "{}",
+        err.message
+    );
+
+    supplied.insert("temperature".into(), Value::from("warm"));
+    let err =
+        weaver_lang::evaluate_value_doc(&doc, &supplied, &mut host, &realm_registry()).unwrap_err();
+    assert!(
+        err.message.contains("expected range(0, 2), got string"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn a_span_holds_a_from_to_pair_inside_its_space() {
+    let doc = parse_value_doc(GROUP_CHAT).unwrap();
+    let mut host = RealmHost {
+        live: vec!["snowflake-1".into()],
+        ..Default::default()
+    };
+    let mut supplied = group_chat_inputs();
+
+    let span = |from: f64, to: f64| Value::object([("from", from), ("to", to)]);
+
+    supplied.insert("turns".into(), span(10.0, 20.0));
+    assert!(weaver_lang::evaluate_value_doc(&doc, &supplied, &mut host, &realm_registry()).is_ok());
+
+    supplied.insert("turns".into(), span(20.0, 10.0));
+    let err =
+        weaver_lang::evaluate_value_doc(&doc, &supplied, &mut host, &realm_registry()).unwrap_err();
+    assert!(
+        err.message.contains("input turns: from 20 is above to 10"),
+        "{}",
+        err.message
+    );
+
+    supplied.insert("turns".into(), span(0.0, 20.0));
+    let err =
+        weaver_lang::evaluate_value_doc(&doc, &supplied, &mut host, &realm_registry()).unwrap_err();
+    assert!(
+        err.message
+            .contains("input turns: 0 to 20 is outside span(1, 50)"),
+        "{}",
+        err.message
+    );
+
+    // An array is the other plausible spelling, and is not this one.
+    supplied.insert("turns".into(), Value::Array(vec![4i64.into(), 8i64.into()]));
+    let err =
+        weaver_lang::evaluate_value_doc(&doc, &supplied, &mut host, &realm_registry()).unwrap_err();
+    assert!(
+        err.message.contains("expected span(1, 50), got array"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn a_space_written_backwards_is_a_parse_error() {
+    let errors = parse_value_doc("#inputs\nheat: range(10, 0)\n\n{}").unwrap_err();
+    assert!(
+        errors[0].message.contains("empty space: 10 is above 0"),
+        "{}",
+        errors[0].message
+    );
+}

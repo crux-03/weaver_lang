@@ -227,6 +227,41 @@ fn build_input_type(pair: pest::iterators::Pair<Rule>) -> Result<InputType, Vec<
         Rule::list_type => Ok(InputType::List(Box::new(build_input_type(
             pair.into_inner().next().unwrap(),
         )?))),
+        Rule::object_type => {
+            let mut fields = Vec::new();
+            for field in pair.into_inner() {
+                let fspan = pair_span(&field);
+                let mut parts = field.into_inner();
+                let name = parts.next().unwrap().as_str().to_string();
+                let ty = build_input_type(parts.next().unwrap())?;
+                if fields.iter().any(|(existing, _)| existing == &name) {
+                    return Err(vec![
+                        ParseError::new(fspan, format!("duplicate field: {name}"))
+                            .with_hint("each field may be declared only once"),
+                    ]);
+                }
+                fields.push((name, ty));
+            }
+            Ok(InputType::Object(fields))
+        }
+        Rule::range_type | Rule::span_type => {
+            let rule = pair.as_rule();
+            let mut bounds = pair
+                .into_inner()
+                .map(|p| p.as_str().parse::<f64>().unwrap());
+            let (lo, hi) = (bounds.next().unwrap(), bounds.next().unwrap());
+            if lo > hi {
+                return Err(vec![
+                    ParseError::new(span, format!("empty space: {lo} is above {hi}"))
+                        .with_hint("bounds are written low first: range(0, 10)"),
+                ]);
+            }
+            Ok(if rule == Rule::range_type {
+                InputType::Range(lo, hi)
+            } else {
+                InputType::Span(lo, hi)
+            })
+        }
         Rule::ref_type => Ok(InputType::Ref(
             pair.into_inner().next().unwrap().as_str().to_string(),
         )),

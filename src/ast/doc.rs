@@ -43,15 +43,22 @@ impl InputDecl {
 /// resolves. Keeping the vocabulary closed is what lets a UI render
 /// `[Ref<Character>]` as a character multi-picker and `enum(...)` as a
 /// dropdown.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum InputType {
     String,
     Number,
     Bool,
     /// `enum("easy", "normal", "brutal")` — one of a fixed set of strings.
     Enum(Vec<String>),
+    /// `range(0, 10)` — a number inside an inclusive space
+    Range(f64, f64),
+    /// `span(0, 10)` — a `{from, to}` pair inside an inclusive space
+    Span(f64, f64),
     /// `[T]` — a list of the inner type.
     List(Box<InputType>),
+    /// `{char: Ref<Character>, talkativeness: number}` — a fixed set of
+    /// named fields, in declaration order.
+    Object(Vec<(String, InputType)>),
     /// `Ref<Character>` — an id that must resolve to a live entity of that
     /// kind. The kind comes from the host-populated registry, and whether a
     /// given id resolves is answered by
@@ -75,7 +82,19 @@ impl std::fmt::Display for InputType {
                 }
                 write!(f, ")")
             }
+            InputType::Range(lo, hi) => write!(f, "range({lo}, {hi})"),
+            InputType::Span(lo, hi) => write!(f, "span({lo}, {hi})"),
             InputType::List(inner) => write!(f, "[{inner}]"),
+            InputType::Object(fields) => {
+                write!(f, "{{")?;
+                for (i, (name, ty)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{name}: {ty}")?;
+                }
+                write!(f, "}}")
+            }
             InputType::Ref(kind) => write!(f, "Ref<{kind}>"),
         }
     }

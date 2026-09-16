@@ -117,8 +117,9 @@ fn bind_inputs(
 /// Check one value against its declared type.
 ///
 /// The language checks the shapes it named — string, number, bool, enum
-/// membership, list-of — and hands `Ref<Kind>` to the host, which is the
-/// only party that can say whether an id resolves to a live entity.
+/// membership, bounds, list-of, object-of — and hands `Ref<Kind>` to the
+/// host, which is the only party that can say whether an id resolves to a
+/// live entity.
 fn check_value(
     value: &Value,
     ty: &InputType,
@@ -148,6 +149,72 @@ fn check_value(
                 ),
             )
             .with_span(decl.span)),
+            None => mismatch(),
+        },
+        InputType::Range(lo, hi) => match value.as_number() {
+            Some(n) if n >= *lo && n <= *hi => Ok(()),
+            Some(n) => Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                format!("input {}: {n} is outside {ty}", decl.name),
+            )
+            .with_span(decl.span)),
+            None => mismatch(),
+        },
+        InputType::Span(lo, hi) => {
+            let map = match value.as_object() {
+                Some(map) => map,
+                None => return mismatch(),
+            };
+            let bounds = map
+                .get("from")
+                .and_then(Value::as_number)
+                .zip(map.get("to").and_then(Value::as_number));
+            match bounds {
+                // Exactly the two handles, in the order they are dragged.
+                Some((from, to)) if map.len() == 2 => {
+                    let bad = |what: String| {
+                        Err(EvalError::new(
+                            EvalErrorKind::TypeError,
+                            format!("input {}: {what}", decl.name),
+                        )
+                        .with_span(decl.span))
+                    };
+                    if from > to {
+                        bad(format!("from {from} is above to {to}"))
+                    } else if from < *lo || to > *hi {
+                        bad(format!("{from} to {to} is outside {ty}"))
+                    } else {
+                        Ok(())
+                    }
+                }
+                _ => mismatch(),
+            }
+        }
+        InputType::Object(fields) => match value.as_object() {
+            Some(map) => {
+                for (name, field_ty) in fields {
+                    match map.get(name) {
+                        Some(field) => check_value(field, field_ty, decl, ctx, registry)?,
+                        None => {
+                            return Err(EvalError::new(
+                                EvalErrorKind::TypeError,
+                                format!("input {}: missing field {name} ({field_ty})", decl.name),
+                            )
+                            .with_span(decl.span));
+                        }
+                    }
+                }
+                // A field nobody declared is a typo or a stale caller, the
+                // same as a value for an input nobody declared.
+                match map.keys().find(|k| !fields.iter().any(|(n, _)| n == *k)) {
+                    Some(extra) => Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        format!("input {}: no such field: {extra}", decl.name),
+                    )
+                    .with_span(decl.span)),
+                    None => Ok(()),
+                }
+            }
             None => mismatch(),
         },
         InputType::List(inner) => match value.as_array() {

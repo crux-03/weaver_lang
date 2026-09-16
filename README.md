@@ -27,7 +27,7 @@ line.
 Install with `cargo add weaver_lang` or:
 ```toml
 [dependencies]
-weaver_lang = "0.7"
+weaver_lang = "0.8"
 ```
 
 | feature  | default | what it adds |
@@ -842,7 +842,7 @@ giving up its shape.
 Enable the `wtn` feature:
 
 ```toml
-weaver_lang = { version = "0.7", features = ["wtn"] }
+weaver_lang = { version = "0.8", features = ["wtn"] }
 ```
 
 ```rust
@@ -953,9 +953,25 @@ rounds: number = 3
 ```
 
 The type vocabulary is small and closed: `string`, `number`, `bool`,
-`enum(...)`, `[T]`, and `Ref<Kind>`. That closure is what makes the form
-generable, since `[Ref<Character>]` renders as a multi-picker and `enum(...)`
-as a dropdown.
+`enum(...)`, `range(lo, hi)`, `span(lo, hi)`, `[T]`, `{field: T, ...}`, and
+`Ref<Kind>`. That closure is what makes the form generable, since
+`[Ref<Character>]` renders as a multi-picker and `enum(...)` as a dropdown.
+
+`range` and `span` are the two sliders. A `range(0, 2)` input is one number
+inside those inclusive bounds; a `span(1, 50)` is a `{from, to}` pair inside
+them, with `from` at or below `to`. An object type names a fixed set of
+fields, which is how an input carries more than an id:
+
+```
+#inputs
+participants: [{char: Ref<Character>, talkativeness: number}]
+temperature: range(0, 2) = 0.8
+turns: span(1, 50) = {from: 4, to: 8}
+```
+
+Fields are checked in declaration order, and a value carrying a field the type
+never declared is an error — the same reading as a value supplied for an input
+nobody declared.
 
 An input with no `=` is required. Defaults are ordinary expressions, applied
 by the evaluator rather than by every host. Read the declarations off a parsed
@@ -992,7 +1008,7 @@ registry.register_kind("Character");
 ```
 
 The language checks the shapes it named (string, number, bool, enum
-membership, list-of) and hands `Ref<Kind>` to the host, which is the only
+membership, bounds, list-of, object-of) and hands `Ref<Kind>` to the host, which is the only
 party that can answer it. Everything is checked before expansion begins, and
 every failure is reported against the declaration that asked for the value.
 
