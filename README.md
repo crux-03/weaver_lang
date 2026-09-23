@@ -92,7 +92,7 @@ assert_eq!(cond.evaluate(&mut ctx, &registry).unwrap(), Value::Bool(true));
 | literals    | `{name: "Alice", hp: 10}`, `["sword", "shield"]`                   |
 | indexing    | `{{items[0]}}`, `{{obj["key"]}}`, `{{party[i].name}}`              |
 | processors  | `@[namespace.name(foo: value1, bar: value2)]`                      |
-| commands    | `$[name(foo, bar)]`                                                |
+| commands    | `$[name(foo, bar)]`, `$[namespace.name(foo, bar)]`                  |
 | triggers    | `<trigger id="some_id">`                                           |
 | documents   | `[[some_id]]`                                                      |
 | if/else     | `{# if foo == bar #} baz {# endif #}`                              |

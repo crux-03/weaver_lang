@@ -101,10 +101,10 @@ processor_call = {
     "@[" ~ trim_l? ~ ws ~ dotted_name ~ "(" ~ ws ~ call_args? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
 }
 
-// ── Commands: $[name(arg1, arg2)] ───────────────────────────────────────
+// ── Commands: $[name(arg1, arg2)] or $[namespace.name(arg1)] ────────────
 
 command_call = {
-    "$[" ~ trim_l? ~ ws ~ identifier ~ "(" ~ ws ~ call_args? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
+    "$[" ~ trim_l? ~ ws ~ dotted_name ~ "(" ~ ws ~ call_args? ~ ws ~ ")" ~ ws ~ trim_r? ~ "]"
 }
 
 // ── Call arguments ──────────────────────────────────────────────────────

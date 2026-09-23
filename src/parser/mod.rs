@@ -1749,6 +1749,15 @@ mod tests {
     }
 
     #[test]
+    fn test_namespaced_command_call() {
+        let template = parse("$[telemetry.register()]").unwrap();
+        match &template.nodes[0].node {
+            NodeKind::Command(cmd) => assert_eq!(cmd.name, "telemetry.register"),
+            _ => panic!("expected command"),
+        }
+    }
+
+    #[test]
     fn test_processor_with_array_property() {
         let template = parse(r#"@[core.weaver.wildcard(items: ["a", "b", "c"])]"#).unwrap();
         assert_eq!(template.nodes.len(), 1);
